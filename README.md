@@ -1,9 +1,9 @@
-# SDR 101: Signal Inspector
+# Signal Inspector
 
-**Version:** 1.1.0  
+**Version:** 1.1.0
 **Author:** Richard Shmel  
 
-A modular, offline Digital Signal Processing (DSP) tool designed for inspecting, tuning, demodulating, and reverse-engineering IQ recordings. Built with Python 3, PyQt5, and SciPy, it prioritizes memory efficiency and architectural modularity.
+A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt5, NumPy, and SciPy.
 
 Note: currently supports
 - 2/4/8 FSK
@@ -12,18 +12,18 @@ Note: currently supports
 **TODO**
 - Add support for PSK.
 - Add FEC and checksum analysis.
-- Add aditional encodings.
+- Add additional encodings.
 - Add additional symbol timing recovery options.
 
 ---
 
 ## Quick Start
 
-This tool includes a self-bootstrapping launcher to handle Python virtual environments and dependencies automatically.
+This tool includes a launcher to handle Python virtual environments and dependencies automatically.
 
 ### Prerequisites
-- Python 3.8+ (3.11 recommended)
-- Linux / macOS / Windows (WSL recommended)
+- Python 3.8+
+- Linux / macOS / Windows (Ubuntu recommended)
 
 ### Running the Tool
 1. **Clone the repository:**
@@ -43,23 +43,23 @@ This tool includes a self-bootstrapping launcher to handle Python virtual enviro
 ## User Guide
 
 ### The Workflow: "Load, Process, Stage"
-The Inspector operates as a linear pipeline. Data does not automatically flow between tabs. You must explicitly **Stage** output from one tab and **Load** it into the next. This allows for safe experimentation without losing your place.
+The Inspector operates as a linear pipeline. Data does not automatically flow between tabs. You must explicitly **Stage** output from one tab and **Load** it into the next.
 
 ### 1. Spectrogram View (Source)
 The entry point for raw data. Only complex floating-point 32-bit data is supported.
-- **Controls:** Open `.cf32` / `.fc32` / `.c32` / `.cfile` / `.iq` / `.raw` recordings.
+- **Controls:** Open IQ recordings.
 - **Memory Safety:** Uses `np.memmap` to handle multi-gigabyte files without crashing RAM.
 - **Mosaic View:** If zoomed out on massive files, enables a "Mosaic" stride to visualize the entire file duration safely.
-- **Action:** Click **"STAGE FILE ➡"** to make the file handle available to the Tuner.
+- **Action:** Click **"STAGE FILE"** to make the file handle available to the Tuner.
 
-### 2. Tuner & Filter (Extraction)
+### 2. Tuner and Filter (Extraction)
 Isolates a specific signal of interest from the wideband recording.
 - **Input:** Raw IQ File Handle (from Tab 1).
 - **Time Selection:** Vertical sliders select the time slice to process.
 - **Frequency Selection:** Horizontal sliders select the carrier frequency and bandwidth.
 - **DSP:** Mixes the selection to Baseband (0 Hz) and applies a low-pass filter.
 - **Export:** (Optional) Save specific raw or filtered fragments to disk as `.cf32` for external tools.
-- **Action:** Click **"Apply"** to preview, then **"STAGE OUTPUT ➡"** to save the filtered samples to memory.
+- **Action:** Click **"Apply"** to preview, then **"STAGE OUTPUT"** to save the filtered samples to memory.
 
 ### 3. Demodulator (Analog)
 Converts complex IQ samples into real-valued analog signals.
@@ -68,14 +68,14 @@ Converts complex IQ samples into real-valued analog signals.
   - **Amplitude:** Magnitude detection (ASK).
   - **Frequency:** Phase differencing (FSK).
 - **Slicer Preview:** Overlay threshold lines on the analog waveform to visualize how bits will be decided.
-- **Action:** Click **"STAGE OUTPUT ➡"** to commit the analog demodulation and threshold settings.
+- **Action:** Click **"STAGE OUTPUT"** to commit the analog demodulation and threshold settings.
 
-### 4. Bit Slicer & Clock (Digital)
+### 4. Symbol Timing Recovery (Digital)
 Converts analog signals into discrete symbols (0, 1, 2, 3, etc) via user-aided symbol recovery.
 - **Input:** Demodulated Analog Signal + Thresholds (from Tab 3).
 - **Manual Clocking:** Drag the "Clock Region" box to align red tick marks with the center of your symbols.
 - **Auto-Sync (Beta):** After manually aligning 4+ symbols, the tool can algorithmically estimate the clock for the rest of the burst.
-- **Action:** Click **"STAGE OUTPUT ➡"** to extract the discrete symbols.
+- **Action:** Click **"STAGE OUTPUT"** to extract the discrete symbols.
 
 ### 5. Data Inspector (Analysis)
 Basic reverse engineering.
@@ -131,7 +131,7 @@ To add a new module (e.g., "OFDM Demodulator"):
 5. **Register:** Add the tab to `apps/basic_signal_inspector.py`.
 
 ### DSP Utilities
-All heavy mathematical lifting resides in `utils/dsp_lib.py`. This ensures consistency across tabs (e.g., using the same FFT normalization) and allows for easier unit testing.
+All heavy mathematical lifting resides in `utils/dsp_lib.py`. This ensures consistency across tabs and allows for easier unit testing.
 
 ### Deployment
 Use `run.sh` for all execution. It handles:
@@ -140,7 +140,7 @@ Use `run.sh` for all execution. It handles:
 3.  Installing pinned dependencies from `requirements.txt`.
 4.  Setting `PYTHONPATH` so the `apps/` directory can import `core/`.
 
-To create a new application configuration (e.g., a CLI-only tool), place it in `apps/` and run `./run.sh my_new_app.py`.
+To create a new application configuration, place it in `apps/` and run `./run.sh my_new_app.py`.
 
 ## License
 
