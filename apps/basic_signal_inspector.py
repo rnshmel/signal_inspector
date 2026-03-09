@@ -18,7 +18,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Basic Signal Inspector")
-        self.resize(1200, 900)
+        self.setMinimumSize(900, 600)
+        self.showMaximized()
         
         # Initialize the data backbone.
         self.context = SignalContext()
