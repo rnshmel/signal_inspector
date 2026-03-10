@@ -199,56 +199,82 @@ def _generate_rrc(length, beta):
     # Normalize
     return taps / np.sqrt(np.sum(taps**2))
 
-def find_clock_sync(symbol_data, sr, start_time, current_width, current_count, tolerance_pct=10.0, limit_time=None):
-    # Attempts to find symbol edges to sync the clock.
-    # Returns (success, new_duration, added_symbols).
-    # Note: requires oversmapling.
+# Extracts clock timings using a proportional phase-locked loop (PLL) on zero-crossings.
+# Assumes analog_data is already DC-centered (CFO corrected).
+def find_clock_sync(analog_data, sr, start_time, current_width, current_count, alpha=0.15, limit_time=None):
+    # Extracts clock timings using a proportional phase-locked loop (PLL) on zero-crossings.
+    # Assumes analog_data is already DC-centered (CFO corrected).
+
+    # Establish the manual seed
+    sps_time = current_width / current_count
+    manual_boundary = start_time + current_width
     
-    cursor_t = start_time + current_width
-    added_symbols = 0
-    idx_cursor = int(cursor_t * sr)
+    clock_centers = []
     
-    avg_sym_width = current_width / current_count
-    idx_width_est = int(avg_sym_width * sr)
+    # Generate the manual symbol centers (half an SPS offset from the edges)
+    for i in range(current_count):
+        clock_centers.append(start_time + (i + 0.5) * sps_time)
+        
+    # Setup PLL
+    cursor_edge_t = manual_boundary
+    current_sps_t = sps_time
     
-    search_radius = int(idx_width_est * (tolerance_pct / 100.0))
-    total_len = len(symbol_data)
-    
-    limit_idx = total_len
+    limit_idx = len(analog_data)
     if limit_time is not None:
-        limit_idx = min(total_len, int(limit_time * sr))
+        limit_idx = min(limit_idx, int(limit_time * sr))
         
-    MAX_SYMBOLS = 10000
+    MAX_SYMBOLS = 100000
+    added_symbols = 0
     
-    while idx_cursor < limit_idx and added_symbols < MAX_SYMBOLS:
-        target_idx = idx_cursor + idx_width_est
-        if target_idx >= limit_idx: break
+    # Run the loop
+    while added_symbols < MAX_SYMBOLS:
+        expected_edge_t = cursor_edge_t + current_sps_t
+        expected_edge_idx = int(expected_edge_t * sr)
         
-        w_start = max(idx_cursor + 1, target_idx - search_radius)
-        w_stop = min(limit_idx - 1, target_idx + search_radius)
-        
-        if w_start >= w_stop: break
-        
-        # Look for a transition (edge).
-        chunk = symbol_data[w_start:w_stop]
-        diffs = np.abs(np.diff(chunk))
-        changes = np.where(diffs > 0)[0]
-        
-        if len(changes) > 0:
-            # Snap to the closest edge found.
-            relative_target = target_idx - w_start
-            best_change_idx = (np.abs(changes - relative_target)).argmin()
-            found_edge_relative = changes[best_change_idx]
-            actual_edge_idx = w_start + found_edge_relative + 1
-            idx_cursor = actual_edge_idx
-        else:
-            # No edge found, coast along estimated width.
-            idx_cursor = target_idx
+        if expected_edge_idx >= limit_idx:
+            break
             
+        # Search window: +/- 0.5 SPS
+        search_radius_t = 0.5 * current_sps_t
+        search_radius_idx = int(search_radius_t * sr)
+        
+        w_start = max(0, expected_edge_idx - search_radius_idx)
+        w_stop = min(limit_idx - 1, expected_edge_idx + search_radius_idx)
+        
+        if w_start >= w_stop:
+            break
+            
+        # Find zero crossings
+        chunk = analog_data[w_start:w_stop]
+        crossings = np.where(np.diff(np.signbit(chunk)))[0]
+        
+        if len(crossings) > 0:
+            # Find the crossing closest to our expected edge
+            relative_target = expected_edge_idx - w_start
+            best_idx = (np.abs(crossings - relative_target)).argmin()
+            actual_edge_idx = w_start + crossings[best_idx] + 1 
+            actual_edge_t = actual_edge_idx / sr
+            
+            # Proportional error calculation
+            error_t = actual_edge_t - expected_edge_t
+            
+            # Linear penalty based on distance from expected (0.0 to 1.0)
+            penalty = max(0.0, 1.0 - (abs(error_t) / search_radius_t))
+            effective_alpha = alpha * penalty
+            
+            # Update phase
+            cursor_edge_t = expected_edge_t + (error_t * effective_alpha)
+        else:
+            # No zero crossing found.
+            cursor_edge_t = expected_edge_t
+            
+        # The center to sample the symbol is halfway between the edges
+        center_t = cursor_edge_t - (current_sps_t / 2.0)
+        clock_centers.append(center_t)
+        
         added_symbols += 1
         
-    new_duration = idx_cursor / sr
-    return True, new_duration, added_symbols
+    return True, np.array(clock_centers), manual_boundary
 
 def invert_symbols(symbols, modulus):
     return (modulus - 1) - symbols
@@ -293,3 +319,36 @@ def decode_manchester_string(bit_string, scheme):
         decoded.append(map_table.get(p, 'E'))
         
     return "".join(decoded)
+
+def remove_dc_bias(analog_data, thresholds):
+    # Centers the analog data around 0.0 using the middle threshold (CFO correction).
+
+    if thresholds:
+        # Get the middle threshold as the DC bias
+        mid_idx = len(thresholds) // 2
+        dc_offset = thresholds[mid_idx]
+    else:
+        # Fallback to mean if no thresholds are set
+        dc_offset = np.mean(analog_data)
+        
+    centered_data = analog_data - dc_offset
+    adjusted_thresholds = [t - dc_offset for t in thresholds]
+    
+    return centered_data, adjusted_thresholds, dc_offset
+
+def sample_and_slice(analog_data, timestamps, sr, thresholds):
+    #Samples analog data at specific timestamps and digitizes into integer symbols.
+
+    # Convert timestamps to indices, safely clipped to array bounds
+    indices = np.clip(np.array(timestamps) * sr, 0, len(analog_data) - 1).astype(int)
+    
+    # Sample the continuous wave
+    analog_samples = analog_data[indices]
+    
+    # Slice based on thresholds
+    if not thresholds:
+        thresh = [0.0]
+    else:
+        thresh = thresholds
+        
+    return np.digitize(analog_samples, thresh)
