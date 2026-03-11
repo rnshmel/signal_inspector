@@ -3,7 +3,7 @@ import pyqtgraph as pg
 from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QGroupBox, QCheckBox, QSlider,
                              QSpinBox, QDoubleSpinBox, QMessageBox, QScrollArea)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 # Import the base class.
 from core.base_tab import BaseSignalTab
@@ -29,6 +29,11 @@ class SlicerTab(BaseSignalTab):
         # Visual items.
         self.tick_lines = []
         self.digital_color_name = 'Orange'
+
+        # Timer for debouncing heavy array slicing and tick updates
+        self.update_timer = QTimer()
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self.refresh_plot_data)
         
         self.init_ui()
 
@@ -43,8 +48,9 @@ class SlicerTab(BaseSignalTab):
         self.plot_main.setLabel('bottom', 'Time', units='s')
         self.plot_main.setLabel('left', 'Amplitude') 
         self.plot_main.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_main.setDownsampling(auto=False)
-        self.plot_main.setClipToView(False)
+        # Optimization
+        self.plot_main.setClipToView(True)
+        self.plot_main.setDownsampling(auto=True, mode='peak')
         self.plot_main.setMouseEnabled(x=True, y=False)
         self.plot_main.setBackground('#1e1e1e')
         
@@ -62,6 +68,7 @@ class SlicerTab(BaseSignalTab):
             line.setPen(pg.mkPen('#AAAAAA', width=4))
             line.setHoverPen(pg.mkPen('#FFFFFF', width=6))
             
+        # Hook up clock region changes
         self.clock_region.sigRegionChanged.connect(self.update_clock_ticks)
         self.clock_region.sigRegionChanged.connect(self.extract_symbols)
         self.plot_main.addItem(self.clock_region)
@@ -94,8 +101,9 @@ class SlicerTab(BaseSignalTab):
         self.nav_region.setZValue(10)
         self.plot_mini.addItem(self.nav_region)
         self.nav_region.sigRegionChanged.connect(self.update_zoom_from_nav)
-        self.plot_main.sigRangeChanged.connect(self.update_nav_from_zoom)
-        self.plot_main.sigRangeChanged.connect(self.update_clock_ticks) # Update ticks on scroll
+        
+        # Connect main plot range changes to our debounced handler
+        self.plot_main.sigRangeChanged.connect(self.on_range_changed)
         
         self.viz_layout.addWidget(self.plot_mini)
 
@@ -129,10 +137,26 @@ class SlicerTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.btn_autoscale)
         self.sidebar_layout.addSpacing(20)
 
-        # Section 2: Visuals.
+        # Visuals.
         self.grp_vis = QGroupBox("2. Visual Settings")
         self.vis_layout = QVBoxLayout()
         self.grp_vis.setLayout(self.vis_layout)
+
+        # View Settings
+        self.lbl_active_points = QLabel("Visible Points: --")
+        self.lbl_active_points.setStyleSheet("font-size: 11px; color: #888; font-weight: bold;")
+        self.vis_layout.addWidget(self.lbl_active_points)
+        
+        row_thresh = QHBoxLayout()
+        row_thresh.addWidget(QLabel("Plot Threshold:"))
+        self.spin_plot_thresh = QSpinBox()
+        self.spin_plot_thresh.setRange(1000, 5000000)
+        self.spin_plot_thresh.setSingleStep(10000)
+        self.spin_plot_thresh.setValue(10000)
+        self.spin_plot_thresh.setToolTip("Maximum points drawn 1:1 before peak-downsampling activates.")
+        self.spin_plot_thresh.valueChanged.connect(self.refresh_plot_data)
+        row_thresh.addWidget(self.spin_plot_thresh)
+        self.vis_layout.addLayout(row_thresh)
         
         self.chk_light_mode = QCheckBox("Light Mode")
         self.chk_light_mode.stateChanged.connect(self.toggle_light_mode)
@@ -233,22 +257,12 @@ class SlicerTab(BaseSignalTab):
         }.items() if v == user_color), 'Orange'))
         if idx >= 0: self.cb_color.setCurrentIndex(idx)
         
-        # Update Plot Data
-        MAX_POINTS = 10000
+        # Update Mini Map (Statically decimated for speed)
         total_points = len(self.centered_analog_data)
-        if total_points > MAX_POINTS:
-            step = total_points // MAX_POINTS
-            y_data = self.centered_analog_data[::step]
-            x_axis = np.arange(len(y_data)) * (step / self.local_sr)
-        else:
-            y_data = self.centered_analog_data
-            x_axis = np.arange(total_points) / self.local_sr
-            
-        self.curve_digital.setData(x_axis, y_data)
-        
-        # Update Mini Map
-        mini_step = max(1, len(y_data) // 5000)
-        self.curve_mini.setData(x_axis[::mini_step], y_data[::mini_step]) 
+        mini_step = max(1, total_points // 5000)
+        y_data_mini = self.centered_analog_data[::mini_step]
+        x_axis_mini = np.arange(len(y_data_mini)) * (mini_step / self.local_sr)
+        self.curve_mini.setData(x_axis_mini, y_data_mini) 
         
         current_range = self.plot_mini.viewRange()[0]
         actual_duration = total_points / self.local_sr
@@ -257,7 +271,10 @@ class SlicerTab(BaseSignalTab):
         if abs(current_range[1] - actual_duration) > 0.01:
              self.plot_mini.setXRange(0, actual_duration)
              zoom_t = actual_duration * 0.005
+             
+             self.nav_region.blockSignals(True)
              self.nav_region.setRegion([0, zoom_t])
+             self.nav_region.blockSignals(False)
              
              # Reset clock box.
              box_width = zoom_t * 0.2
@@ -271,20 +288,72 @@ class SlicerTab(BaseSignalTab):
              self.spin_symbols.blockSignals(False)
              self.last_symbol_count = 1 
              
+             self.plot_main.setXRange(0, zoom_t, padding=0)
+             
              self.check_auto_enable()
-             self.update_clock_ticks()
              self.stop_line.setValue(actual_duration)
         
         self.autoscale_view()
         self.extract_symbols()
         
+        # Trigger an immediate plot refresh
+        self.refresh_plot_data()
+        
         return True, f"Loaded {total_points} samples."
+
+    def on_range_changed(self, _, viewRange):
+        # Visually sync the minimap box immediately
+        self.nav_region.blockSignals(True)
+        self.nav_region.setRegion(viewRange[0])
+        self.nav_region.blockSignals(False)
+        
+        # Restart the timer to debounce the plot update
+        self.update_timer.start(50)
+
+    def refresh_plot_data(self):
+        self.update_main_plot()
+        self.update_clock_ticks()
+
+    def update_main_plot(self):
+        if self.centered_analog_data is None: return
+        
+        sr = self.local_sr
+        total_points = len(self.centered_analog_data)
+        
+        # Get the strict visible time window
+        view_range = self.plot_main.viewRange()[0]
+        min_t, max_t = view_range[0], view_range[1]
+        
+        # Add a buffer on either side for panning
+        pad_t = (max_t - min_t) * 0.25
+        min_t = max(0, min_t - pad_t)
+        max_t = min(total_points / sr, max_t + pad_t)
+        
+        i_start = max(0, int(min_t * sr))
+        i_stop = min(total_points, int(max_t * sr))
+        
+        if i_stop <= i_start: return
+        
+        # Only extract the exact segment we need
+        view_y = self.centered_analog_data[i_start:i_stop]
+        view_x = np.arange(i_start, i_stop) / sr
+        
+        # Decide if we pass raw points or let PyQtGraph apply peak-downsampling
+        num_points = len(view_y)
+        if num_points > self.spin_plot_thresh.value():
+            self.plot_main.setDownsampling(auto=True, mode='peak')
+            self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [Downsampled]")
+        else:
+            self.plot_main.setDownsampling(auto=False)
+            self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [1:1]")
+            
+        self.curve_digital.setData(view_x, view_y)
 
     def stage_output(self):
         if self.symbol_buffer is None or len(self.symbol_buffer) == 0:
             return False, "No symbols extracted."
             
-        # Commit to context.
+        # Commit to context
         self.context.symbols = np.copy(self.symbol_buffer)
         
         # Calculate overall symbol rate (baud).
@@ -301,7 +370,7 @@ class SlicerTab(BaseSignalTab):
         return True, f"Staged {len(self.context.symbols)} symbols."
 
     def extract_symbols(self):
-        # Extracts specific points in time from the analog wave and runs them through the slicer.
+        # Extracts specific points in time from the analog wave and runs them through the slicer
         if self.centered_analog_data is None: return
         
         sr = self.local_sr
@@ -434,10 +503,10 @@ class SlicerTab(BaseSignalTab):
             self.auto_start_line.setVisible(True)
             
             total = len(centers)
-            self.lbl_auto_status.setText(f"Status: PLL Locked (Total Sym: {total})")
+            self.lbl_auto_status.setText(f"Status: PLL Mode (Total Sym: {total})")
             self.lbl_auto_status.setStyleSheet("color: #2E7D32; font-weight: bold;")
             
-            self.update_clock_ticks()
+            self.refresh_plot_data()
             self.extract_symbols()
 
     def clear_auto_sync(self):
@@ -458,7 +527,7 @@ class SlicerTab(BaseSignalTab):
         self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
         
         self.check_auto_enable()
-        self.update_clock_ticks()
+        self.refresh_plot_data()
         self.extract_symbols()
 
     def autoscale_view(self):
@@ -556,9 +625,9 @@ class SlicerTab(BaseSignalTab):
 
     def update_zoom_from_nav(self):
         min_x, max_x = self.nav_region.getRegion()
+        # Modifying XRange here triggers on_range_changed internally
         self.plot_main.setXRange(min_x, max_x, padding=0)
 
     def update_nav_from_zoom(self, _, viewRange):
-        self.nav_region.blockSignals(True)
-        self.nav_region.setRegion(viewRange[0])
-        self.nav_region.blockSignals(False)
+        # We don't need to do anything here anymore, on_range_changed handles it
+        pass
