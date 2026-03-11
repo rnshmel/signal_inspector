@@ -100,7 +100,7 @@ class DemodTab(BaseSignalTab):
         
         self.sidebar_layout.addWidget(QLabel("Mode:"))
         self.cb_mode = QComboBox()
-        self.cb_mode.addItems(["Amplitude (ASK/OOK)", "Frequency (FSK)"])
+        self.cb_mode.addItems(["Amplitude (ASK)", "Frequency (FSK)", "Phase (PSK)"])
         self.sidebar_layout.addWidget(self.cb_mode)
         self.sidebar_layout.addSpacing(10)
         
@@ -238,19 +238,34 @@ class DemodTab(BaseSignalTab):
         if self.demod_result is None:
             return False, "No demodulated data. Click 'RUN DEMOD' first."
             
-        self.context.demod_signal = self.demod_result
-        self.context.demod_sr = self.local_filtered_sr
         self.context.demod_mode = self.cb_mode.currentText()
+        self.context.demod_sr = self.local_filtered_sr
+        
+        # If we are doing DPSK and slicer is active, threshold the entire array for the next tab.
+        if "Phase" in self.context.demod_mode and self.chk_slicer.isChecked() and self.thresh_lines:
+            thresh = self.thresh_lines[0].value()
+            edges = np.diff((self.demod_result > thresh).astype(int)) > 0
+            edges = np.insert(edges, 0, False)
+
+            full_state = (np.cumsum(edges) % 2) * 2 - 1 
+            self.context.demod_signal = full_state
+            
+        else:
+            self.context.demod_signal = self.demod_result
         
         # Save threshold settings if slicer was active.
         if self.chk_slicer.isChecked() and self.thresh_lines:
-            vals = sorted([line.value() for line in self.thresh_lines])
-            self.context.thresholds = vals
+            if "Phase" in self.context.demod_mode:
+                # overide to 0
+                self.context.thresholds = [0.0]
+            else:
+                vals = sorted([line.value() for line in self.thresh_lines])
+                self.context.thresholds = vals
         
         # Save color preference.
         self.context.viz_trace_color = self.get_adaptive_color(self.digital_color_name)
         
-        return True, f"Staged {len(self.demod_result)} samples."
+        return True, f"Staged {len(self.context.demod_signal)} samples."
 
     def run_demod(self):
         if self.local_filtered_data is None: return
@@ -265,6 +280,12 @@ class DemodTab(BaseSignalTab):
         elif "Frequency" in mode:
             self.raw_demod_result = dsp.demodulate_fm(self.local_filtered_data, sr)
             self.plot_main.setLabel('left', 'Frequency', units='Hz')
+        elif "Phase" in mode:
+            # Look up filter length from context
+            k_base = getattr(self.context, 'filter_length', 1) 
+            k = int(k_base * 1.05)
+            self.raw_demod_result = dsp.demodulate_dpsk(self.local_filtered_data, k)
+            self.plot_main.setLabel('left', 'Phase Mag', units='rad')
             
         # Default active array is the raw array.
         self.demod_result = self.raw_demod_result.copy()
@@ -377,7 +398,24 @@ class DemodTab(BaseSignalTab):
         view_y = self.demod_result[i_start:i_stop]
         view_x = np.arange(i_start, i_stop) / sr
         
-        # Digitize only the visible data
+        if "Phase" in self.cb_mode.currentText():
+            thresh = thresh_vals[0] if thresh_vals else 0.5
+            
+            # Find rising edges ONLY
+            edges = np.diff((view_y > thresh).astype(int)) > 0
+            edges = np.insert(edges, 0, False)
+            
+            # Track state, mod 2, map 0 == -1 and 1 == 1
+            state = (np.cumsum(edges) % 2) * 2 - 1
+            
+            # Scale it to look nice overlaid on the analog spikes
+            y_max = np.max(view_y) if len(view_y) > 0 else 1.0
+            mapped_y = state * (y_max * 0.4) + (y_max * 0.5)
+            
+            self.curve_digital.setData(view_x, mapped_y)
+            return
+        
+        # Digitize only the visible data for normal AM/FM
         view_symbols = np.digitize(view_y, thresh_vals)
         
         mapped_y = np.zeros_like(view_y)
@@ -566,5 +604,4 @@ class DemodTab(BaseSignalTab):
 
     def update_zoom_from_region(self):
         min_x, max_x = self.region.getRegion()
-        # Modifying XRange here triggers on_range_changed internally
         self.plot_main.setXRange(min_x, max_x, padding=0)
