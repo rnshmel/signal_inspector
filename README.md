@@ -1,18 +1,18 @@
 # Signal Inspector
 
-**Version:** 1.2.2
+**Version:** 1.3.0
  
 A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt5, NumPy, and SciPy.
 
 Note: currently supports
-- 2/4/8 FSK
-- 2/4/8 ASK
+- 2/4/8 Level FSK
+- 2/4/8 Level ASK
+- 2 Level PSK
 
 **TODO**
-- Add support for PSK.
+- Add support for 4/8 PSK.
 - Add FEC and checksum analysis.
 - Add additional encodings.
-- Add additional symbol timing recovery options.
 
 ---
 

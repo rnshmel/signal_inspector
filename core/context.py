@@ -24,6 +24,7 @@ class SignalContext:
         self.filtered_signal = None
         self.filtered_sr = 1.0
         self.filter_center_freq = 0.0
+        self.filter_length = 0
 
         # Demodulated data.
         self.demod_signal = None 

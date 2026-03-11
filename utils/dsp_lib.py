@@ -83,7 +83,6 @@ def mix_and_filter(data, sr, target_freq, bandwidth):
     mixer = np.exp(1j * phase).astype(np.complex64)
     mixed_data = data * mixer
     
-    # 2. Filtering.
     # Design a simple FIR filter.
     cutoff_hz = bandwidth / 2.0
     # Transition width is 25% of bandwidth.
@@ -100,7 +99,7 @@ def mix_and_filter(data, sr, target_freq, bandwidth):
     # Apply filter.
     filtered_data = scipy.signal.lfilter(taps, 1.0, mixed_data)
     
-    return filtered_data
+    return filtered_data, num_taps
 
 def demodulate_am(data):
     # Performs Amplitude Demodulation.
@@ -122,6 +121,21 @@ def demodulate_fm(data, sr):
     demod_data = d_phase * (sr / (2 * np.pi))
     
     return demod_data
+
+def demodulate_dpsk(data, k_offset):
+    # DPSK Demodulation using a delayed complex conjugate
+    k_offset = max(1, int(k_offset))
+    
+    # Shift the array by k_offset. 
+    # Fill the initial gap with zeros to avoid wrap-around issues
+    delayed = np.roll(data, k_offset)
+    delayed[:k_offset] = 0
+    
+    # Multiply by the complex conjugate of the delayed signal
+    mult = data * np.conj(delayed)
+    
+    # Extract the absolute phase angle
+    return np.abs(np.angle(mult))
 
 def slice_signal(analog_data, thresholds):
     # Converts analog float data to integer symbols based on thresholds.

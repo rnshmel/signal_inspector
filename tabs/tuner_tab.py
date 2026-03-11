@@ -245,12 +245,13 @@ class TunerTab(BaseSignalTab):
         if len(raw_data) == 0: return
 
         # Perform DSP mixing and filtering.
-        filtered_data = dsp.mix_and_filter(raw_data, sr, target_freq, bandwidth)
+        filtered_data, num_taps = dsp.mix_and_filter(raw_data, sr, target_freq, bandwidth)
         
         # Store results locally.
         self.local_filtered_data = filtered_data
         self.local_filtered_sr = sr
         self.local_center_freq = target_freq
+        self.context.filter_length = num_taps
 
         # Preview output spectrogram using Cached FFT settings.
         sxx, extent = dsp.compute_spectrogram(filtered_data, sr, self.viz_fft_size, self.viz_overlap)

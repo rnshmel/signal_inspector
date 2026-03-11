@@ -2,16 +2,16 @@ import sys
 import pyqtgraph as pg
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 
-# Import core context.
+# Import core context
 from core.context import SignalContext
-# Import tabs.
+# Import tabs
 from tabs.spectrogram_tab import SpectrogramTab
 from tabs.tuner_tab import TunerTab
 from tabs.demod_tab import DemodTab
 from tabs.slicer_tab import SlicerTab
 from tabs.inspector_tab import InspectorTab
 
-# Configure pyqtgraph global options.
+# Configure pyqtgraph global options
 pg.setConfigOptions(imageAxisOrder='col-major')
 
 class MainWindow(QMainWindow):
@@ -21,15 +21,15 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 600)
         self.showMaximized()
         
-        # Initialize the data backbone.
+        # Initialize the data context (handoff)
         self.context = SignalContext()
         
-        # Setup UI.
+        # Setup UI
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
         
-        # Load tabs.
-        # We pass the shared context to every tab.
+        # Load tabs
+        # We pass the shared context to every tab
         self.spectrogram_tab = SpectrogramTab(self.context)
         self.tuner_tab = TunerTab(self.context)
         self.demod_tab = DemodTab(self.context)
