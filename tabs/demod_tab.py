@@ -2,7 +2,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QGroupBox, QCheckBox, QSlider, 
-                             QSpinBox)
+                             QSpinBox, QScrollArea)
 from PyQt5.QtCore import Qt, QTimer
 
 # Import the base class.
@@ -36,7 +36,7 @@ class DemodTab(BaseSignalTab):
         main_h_layout = QHBoxLayout()
         self.layout.addLayout(main_h_layout)
 
-        # LEFT: Visualization
+        # Visualization
         self.viz_layout = QVBoxLayout()
         
         # Main plot setup.
@@ -84,11 +84,10 @@ class DemodTab(BaseSignalTab):
         self.plot_main.sigRangeChanged.connect(self.on_range_changed)
         
         self.viz_layout.addWidget(self.plot_mini)
-        main_h_layout.addLayout(self.viz_layout, stretch=1)
 
-        # RIGHT: Sidebar Controls
+        # Sidebar Controls
         self.sidebar = QGroupBox("Demodulation")
-        self.sidebar.setFixedWidth(280)
+        self.sidebar.setMinimumWidth(250)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
@@ -203,7 +202,13 @@ class DemodTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.grp_slicer)
         self.sidebar_layout.addStretch()
         
-        main_h_layout.addWidget(self.sidebar, stretch=0)
+        # Add Layout Components
+        main_h_layout.addLayout(self.viz_layout, stretch=5)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.sidebar)
+        main_h_layout.addWidget(scroll_area, stretch=1)
 
         # Initial state setup.
         self.update_digital_color('Orange')

@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QGroupBox, QPlainTextEdit, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QAbstractItemView, 
                              QRadioButton, QSplitter, QLineEdit, QFileDialog,
-                             QMessageBox, QCheckBox, QComboBox, QSpinBox)
+                             QMessageBox, QCheckBox, QComboBox, QSpinBox, QScrollArea)
 from PyQt5.QtGui import QFont, QTextCursor, QColor, QSyntaxHighlighter, QTextCharFormat
 from PyQt5.QtCore import Qt
 
@@ -42,19 +42,36 @@ class InspectorTab(BaseSignalTab):
         
         self.local_symbols = None
         self.is_syncing = False
+        self.stashed_bits = "" # Holds our in-memory saved state
         
         self.init_ui()
 
     def init_ui(self):
+        # Add custom header buttons for quick save/load (stash/restore)
+        self.btn_stash = QPushButton("💾 Save State")
+        self.btn_stash.setToolTip("Saves the current bit string for a quick reset.")
+        self.btn_stash.setStyleSheet("font-weight: bold; background-color: #fff3e0;")
+        self.btn_stash.clicked.connect(self.stash_state)
+        
+        self.btn_restore = QPushButton("📂 Load State")
+        self.btn_restore.setToolTip("Restores the previously saved bit string.")
+        self.btn_restore.setStyleSheet("font-weight: bold; background-color: #e3f2fd;")
+        self.btn_restore.clicked.connect(self.restore_state)
+        self.btn_restore.setEnabled(False)
+
+        # Insert them into the header_layout inherited from BaseSignalTab
+        # Index 1 and 2 puts them directly to the right of the "Load Input" button
+        self.header_layout.insertWidget(1, self.btn_stash)
+        self.header_layout.insertWidget(2, self.btn_restore)
+
         main_h_layout = QHBoxLayout()
         self.layout.addLayout(main_h_layout)
         
-        # LEFT: Split View
+        # LEFT: Split View (Vertical Splitter for editor/hex)
         self.splitter = QSplitter(Qt.Vertical)
-        main_h_layout.addWidget(self.splitter, stretch=1)
         
         # Bit Editor.
-        self.grp_bits = QGroupBox("Bit Stream (Editable)")
+        self.grp_bits = QGroupBox("Bit Stream (Editable Workbench)")
         self.grp_bits_layout = QVBoxLayout()
         self.grp_bits.setLayout(self.grp_bits_layout)
         
@@ -91,11 +108,34 @@ class InspectorTab(BaseSignalTab):
         
         # RIGHT: Controls
         self.sidebar = QGroupBox("Analysis Controls")
-        self.sidebar.setFixedWidth(300)
+        self.sidebar.setMinimumWidth(250)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
-        main_h_layout.addWidget(self.sidebar, stretch=0)
         
+        # Symbol Mapping
+        self.sidebar_layout.addWidget(QLabel("<b>1. Map Symbols to Buffer:</b>"))
+        self.table_map = QTableWidget()
+        self.table_map.setColumnCount(2)
+        self.table_map.setHorizontalHeaderLabels(["Sym", "Bits"])
+        self.table_map.verticalHeader().setVisible(False)
+        self.table_map.setFixedHeight(150)
+        self.sidebar_layout.addWidget(self.table_map)
+        
+        row_map_btns = QHBoxLayout()
+        self.btn_map_bin = QPushButton("Binary")
+        self.btn_map_bin.clicked.connect(lambda: self.set_mapping_preset('binary'))
+        self.btn_map_gray = QPushButton("Gray Code")
+        self.btn_map_gray.clicked.connect(lambda: self.set_mapping_preset('gray'))
+        self.btn_apply_map = QPushButton("Apply Map")
+        self.btn_apply_map.setStyleSheet("font-weight: bold;")
+        self.btn_apply_map.clicked.connect(self.apply_mapping)
+        
+        row_map_btns.addWidget(self.btn_map_bin)
+        row_map_btns.addWidget(self.btn_map_gray)
+        row_map_btns.addWidget(self.btn_apply_map)
+        self.sidebar_layout.addLayout(row_map_btns)
+        self.sidebar_layout.addSpacing(15)
+
         # View Settings
         self.grp_view = QGroupBox("View Settings")
         self.view_layout = QVBoxLayout()
@@ -119,53 +159,31 @@ class InspectorTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.grp_view)
         self.sidebar_layout.addSpacing(15)
 
-        # Line Coding & Logic
-        self.grp_logic = QGroupBox("1. Line Coding & Logic")
+        # Line Coding and Logic
+        self.grp_logic = QGroupBox("2. Bit String Actions")
         self.logic_layout = QVBoxLayout()
         self.grp_logic.setLayout(self.logic_layout)
         
-        # Symbol Operations
-        self.chk_invert = QCheckBox("Invert Symbols (Active Low)")
-        self.chk_invert.stateChanged.connect(self.apply_mapping)
-        self.logic_layout.addWidget(self.chk_invert)
+        self.btn_invert = QPushButton("Invert Bits (0 ↔ 1)")
+        self.btn_invert.clicked.connect(self.action_invert)
+        self.logic_layout.addWidget(self.btn_invert)
         
-        self.chk_diff = QCheckBox("Differential (NRZ-I)")
-        self.chk_diff.setToolTip("Interprets change as 1, no-change as 0 (for Binary).")
-        self.chk_diff.stateChanged.connect(self.apply_mapping)
-        self.logic_layout.addWidget(self.chk_diff)
+        self.btn_diff = QPushButton("Differential Decode (NRZ-I)")
+        self.btn_diff.setToolTip("Decodes assuming state change = 1, no change = 0")
+        self.btn_diff.clicked.connect(self.action_diff_decode)
+        self.logic_layout.addWidget(self.btn_diff)
         
-        # Bit Operations
+        self.logic_layout.addSpacing(10)
         self.logic_layout.addWidget(QLabel("Line Encoding:"))
         self.cb_encoding = QComboBox()
-        self.cb_encoding.addItems(["None (NRZ-L)", "Manchester (IEEE 802.3)", "Manchester (G.E. Thomas)"])
-        self.cb_encoding.currentTextChanged.connect(self.apply_mapping)
+        self.cb_encoding.addItems(["Manchester (IEEE 802.3)", "Manchester (G.E. Thomas)"])
         self.logic_layout.addWidget(self.cb_encoding)
         
+        self.btn_decode_line = QPushButton("Apply Decoding")
+        self.btn_decode_line.clicked.connect(self.action_line_decode)
+        self.logic_layout.addWidget(self.btn_decode_line)
+        
         self.sidebar_layout.addWidget(self.grp_logic)
-        self.sidebar_layout.addSpacing(15)
-
-        # Symbol Mapping.
-        self.sidebar_layout.addWidget(QLabel("<b>2. Symbol Mapping:</b>"))
-        self.table_map = QTableWidget()
-        self.table_map.setColumnCount(2)
-        self.table_map.setHorizontalHeaderLabels(["Sym", "Bits"])
-        self.table_map.verticalHeader().setVisible(False)
-        self.table_map.setFixedHeight(150)
-        self.sidebar_layout.addWidget(self.table_map)
-        
-        row_map_btns = QHBoxLayout()
-        self.btn_map_bin = QPushButton("Binary")
-        self.btn_map_bin.clicked.connect(lambda: self.set_mapping_preset('binary'))
-        self.btn_map_gray = QPushButton("Gray Code")
-        self.btn_map_gray.clicked.connect(lambda: self.set_mapping_preset('gray'))
-        self.btn_apply_map = QPushButton("Apply Map")
-        self.btn_apply_map.setStyleSheet("font-weight: bold;")
-        self.btn_apply_map.clicked.connect(self.apply_mapping)
-        
-        row_map_btns.addWidget(self.btn_map_bin)
-        row_map_btns.addWidget(self.btn_map_gray)
-        row_map_btns.addWidget(self.btn_apply_map)
-        self.sidebar_layout.addLayout(row_map_btns)
         self.sidebar_layout.addSpacing(15)
         
         # Pattern search and clip
@@ -208,6 +226,14 @@ class InspectorTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.btn_save_txt)
         
         self.sidebar_layout.addStretch()
+
+        # Add Layout Components
+        main_h_layout.addWidget(self.splitter, stretch=5)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.sidebar)
+        main_h_layout.addWidget(scroll_area, stretch=1)
     
     def update_view_settings(self):
         size = self.spin_font.value()
@@ -268,19 +294,9 @@ class InspectorTab(BaseSignalTab):
         self.apply_mapping()
 
     def apply_mapping(self):
-        # Convert symbol stream to bit string using mapping.
+        # Reads the raw integer symbols, translates them using the map table,
+        # and dumps them into the text box buffer. This is a destructive load.
         if self.local_symbols is None: return
-        
-        processed_symbols = np.copy(self.local_symbols)
-        modulus = self.table_map.rowCount() # Number of symbol levels
-        
-        # Differential
-        if self.chk_diff.isChecked():
-            processed_symbols = dsp.decode_differential(processed_symbols, modulus)
-            
-        # Invert
-        if self.chk_invert.isChecked():
-            processed_symbols = dsp.invert_symbols(processed_symbols, modulus)
         
         mapping = {}
         rows = self.table_map.rowCount()
@@ -292,26 +308,77 @@ class InspectorTab(BaseSignalTab):
             mapping[i] = bit_str
             
         # Initialize output array of object type (strings).
-        full_text_arr = np.empty(len(processed_symbols), dtype=object)
+        full_text_arr = np.empty(len(self.local_symbols), dtype=object)
         
         for sym, bit_str in mapping.items():
-            mask = (processed_symbols == sym)
+            mask = (self.local_symbols == sym)
             full_text_arr[mask] = bit_str
             
-        # Join into one massive string.
+        # Join into one massive string and dump to the sandbox
         full_text = "".join(full_text_arr)
-        
-        # Line codes.
-        enc_mode = self.cb_encoding.currentText()
-        if "Manchester" in enc_mode:
-            scheme = 'IEEE' if 'IEEE' in enc_mode else 'Thomas'
-            full_text = dsp.decode_manchester_string(full_text, scheme)
         
         self.txt_bits.blockSignals(True)
         self.txt_bits.setPlainText(full_text)
         self.txt_bits.blockSignals(False)
         
         self.update_hex_view()
+
+    def stash_state(self):
+        self.stashed_bits = self.txt_bits.toPlainText()
+        self.btn_restore.setEnabled(True)
+        # Give visual feedback using the existing status label from the base tab
+        self.lbl_input_status.setVisible(True)
+        self.lbl_input_status.setText("Workbench state saved.")
+        self.lbl_input_status.setStyleSheet("color: #2E7D32; font-weight: bold;")
+
+    def restore_state(self):
+        if self.stashed_bits or self.stashed_bits == "":
+            self.txt_bits.setPlainText(self.stashed_bits)
+            self.lbl_input_status.setVisible(True)
+            self.lbl_input_status.setText("Workbench state restored.")
+            self.lbl_input_status.setStyleSheet("color: #1565C0; font-weight: bold;")
+
+    def action_invert(self):
+        text = self.txt_bits.toPlainText()
+        if not text: return
+        
+        # Fast string translation to flip 0s and 1s
+        trans = str.maketrans('01', '10')
+        new_text = text.translate(trans)
+        
+        self.txt_bits.setPlainText(new_text)
+
+    def action_diff_decode(self):
+        text = self.txt_bits.toPlainText()
+        if not text: return
+        
+        # NRZ-I Decoding: Change = 1, No Change = 0
+        # Assume an implicit initial reference state of '0' for the first bit
+        out = []
+        prev = '0'
+        for char in text:
+            if char not in ('0', '1'):
+                out.append(char) # Preserve whitespace or line breaks if manually added
+                continue
+                
+            if char == prev:
+                out.append('0')
+            else:
+                out.append('1')
+            prev = char
+            
+        self.txt_bits.setPlainText("".join(out))
+
+    def action_line_decode(self):
+        text = self.txt_bits.toPlainText()
+        if not text: return
+        
+        enc_mode = self.cb_encoding.currentText()
+        scheme = 'IEEE' if 'IEEE' in enc_mode else 'Thomas'
+        
+        # Hand off to DSP lib to parse the pairs
+        decoded_text = dsp.decode_manchester_string(text, scheme)
+        self.txt_bits.setPlainText(decoded_text)
 
     def update_hex_view(self):
         if not hasattr(self, 'table_hex'):

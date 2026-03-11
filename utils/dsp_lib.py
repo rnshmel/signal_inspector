@@ -210,6 +210,8 @@ def find_clock_sync(analog_data, sr, start_time, current_width, current_count, a
     manual_boundary = start_time + current_width
     
     clock_centers = []
+
+    beta = alpha / 10.0
     
     # Generate the manual symbol centers (half an SPS offset from the edges)
     for i in range(current_count):
@@ -223,11 +225,10 @@ def find_clock_sync(analog_data, sr, start_time, current_width, current_count, a
     if limit_time is not None:
         limit_idx = min(limit_idx, int(limit_time * sr))
         
-    MAX_SYMBOLS = 100000
     added_symbols = 0
     
     # Run the loop
-    while added_symbols < MAX_SYMBOLS:
+    while True:
         expected_edge_t = cursor_edge_t + current_sps_t
         expected_edge_idx = int(expected_edge_t * sr)
         
@@ -252,8 +253,18 @@ def find_clock_sync(analog_data, sr, start_time, current_width, current_count, a
             # Find the crossing closest to our expected edge
             relative_target = expected_edge_idx - w_start
             best_idx = (np.abs(crossings - relative_target)).argmin()
-            actual_edge_idx = w_start + crossings[best_idx] + 1 
-            actual_edge_t = actual_edge_idx / sr
+            
+            # Linear interpolation of zero crossing
+            c_idx = crossings[best_idx]
+            y0 = chunk[c_idx]
+            y1 = chunk[c_idx + 1]
+            span = abs(y0) + abs(y1)
+            
+            frac_offset = 0.0 if span == 0 else abs(y0) / span
+            
+            # Add frac_offset to get the exact continuous index
+            actual_edge_idx_float = w_start + c_idx + frac_offset 
+            actual_edge_t = actual_edge_idx_float / sr
             
             # Proportional error calculation
             error_t = actual_edge_t - expected_edge_t
@@ -261,9 +272,12 @@ def find_clock_sync(analog_data, sr, start_time, current_width, current_count, a
             # Linear penalty based on distance from expected (0.0 to 1.0)
             penalty = max(0.0, 1.0 - (abs(error_t) / search_radius_t))
             effective_alpha = alpha * penalty
+            effective_beta = beta * penalty
             
             # Update phase
             cursor_edge_t = expected_edge_t + (error_t * effective_alpha)
+            current_sps_t += (error_t * effective_beta)
+
         else:
             # No zero crossing found.
             cursor_edge_t = expected_edge_t

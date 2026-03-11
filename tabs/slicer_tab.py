@@ -2,7 +2,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QGroupBox, QCheckBox, QSlider,
-                             QSpinBox, QDoubleSpinBox, QMessageBox)
+                             QSpinBox, QDoubleSpinBox, QMessageBox, QScrollArea)
 from PyQt5.QtCore import Qt
 
 # Import the base class.
@@ -36,7 +36,7 @@ class SlicerTab(BaseSignalTab):
         main_h_layout = QHBoxLayout()
         self.layout.addLayout(main_h_layout)
 
-        # LEFT: Visualization
+        # Visualization
         self.viz_layout = QVBoxLayout()
         
         self.plot_main = pg.PlotWidget()
@@ -98,11 +98,10 @@ class SlicerTab(BaseSignalTab):
         self.plot_main.sigRangeChanged.connect(self.update_clock_ticks) # Update ticks on scroll
         
         self.viz_layout.addWidget(self.plot_mini)
-        main_h_layout.addLayout(self.viz_layout, stretch=1)
 
-        # RIGHT: Controls
+        # Sidebar Controls
         self.sidebar = QGroupBox("Clock Recovery")
-        self.sidebar.setFixedWidth(280)
+        self.sidebar.setMinimumWidth(250)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
@@ -197,7 +196,14 @@ class SlicerTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.lbl_debug)
         
         self.sidebar_layout.addStretch()
-        main_h_layout.addWidget(self.sidebar, stretch=0)
+
+        # Add Layout Components
+        main_h_layout.addLayout(self.viz_layout, stretch=5)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.sidebar)
+        main_h_layout.addWidget(scroll_area, stretch=1)
 
         # Init state.
         self.update_digital_color('Orange')

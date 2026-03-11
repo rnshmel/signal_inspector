@@ -2,7 +2,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QWidget, QSplitter, QCheckBox,
-                             QGroupBox, QRadioButton, QFileDialog, QMessageBox)
+                             QGroupBox, QRadioButton, QFileDialog, QMessageBox, QScrollArea)
 from PyQt5.QtCore import Qt
 
 # Import the base class.
@@ -31,11 +31,10 @@ class TunerTab(BaseSignalTab):
         main_h_layout = QHBoxLayout()
         self.layout.addLayout(main_h_layout)
 
-        # Visualization (Splitter)
+        # Visualization (Internal Vertical Splitter)
         self.viz_layout = QVBoxLayout()
         self.splitter = QSplitter(Qt.Vertical)
         self.viz_layout.addWidget(self.splitter)
-        main_h_layout.addLayout(self.viz_layout, stretch=1)
 
         # Top Plot (Input)
         self.top_widget = QWidget()
@@ -90,9 +89,9 @@ class TunerTab(BaseSignalTab):
         self.splitter.addWidget(self.bottom_widget)
         self.splitter.setSizes([600, 400])
 
-        # RIGHT: Sidebar Controls
+        # Sidebar Controls
         self.sidebar = QGroupBox("Tuner Controls")
-        self.sidebar.setFixedWidth(280)
+        self.sidebar.setMinimumWidth(250)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
@@ -143,7 +142,13 @@ class TunerTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.grp_export)
         self.sidebar_layout.addStretch()
 
-        main_h_layout.addWidget(self.sidebar, stretch=0)
+        # Add Layout Components
+        main_h_layout.addLayout(self.viz_layout, stretch=5)
+        
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.sidebar)
+        main_h_layout.addWidget(scroll_area, stretch=1)
 
         self.update_colors('Green')
 
