@@ -1,6 +1,6 @@
 # Signal Inspector
 
-**Version:** 1.2.1
+**Version:** 1.2.2
  
 A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt5, NumPy, and SciPy.
 

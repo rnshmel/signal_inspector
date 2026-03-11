@@ -3,7 +3,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QLineEdit, QPushButton, QFileDialog, QGroupBox, 
-                             QGridLayout, QCheckBox, QSpinBox)
+                             QGridLayout, QCheckBox, QSpinBox, QScrollArea)
 from PyQt5.QtCore import Qt
 
 # Import the base class from core.
@@ -33,7 +33,7 @@ class SpectrogramTab(BaseSignalTab):
 
         # Sidebar controls.
         self.sidebar = QGroupBox("Controls")
-        self.sidebar.setFixedWidth(280)
+        self.sidebar.setMinimumWidth(250)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
@@ -73,9 +73,7 @@ class SpectrogramTab(BaseSignalTab):
         row_ram = QHBoxLayout()
         row_ram.addWidget(QLabel("Max RAM (MB):"))
         self.spin_ram_limit = QSpinBox()
-        # 100MB to 2GB (VM safe)
         self.spin_ram_limit.setRange(100, 2000)
-        # Default 500MB
         self.spin_ram_limit.setValue(500)
         self.spin_ram_limit.setSingleStep(100)
         self.spin_ram_limit.setToolTip("Limits the amount of data loaded into RAM for the spectrogram.")
@@ -123,6 +121,7 @@ class SpectrogramTab(BaseSignalTab):
 
         # Visualization area.
         self.viz_layout = QVBoxLayout()
+        
         self.plot_spec = pg.PlotWidget()
         self.plot_spec.setLabel('left', 'Frequency', units='Hz')
         self.plot_spec.setLabel('bottom', 'Time', units='s')
@@ -149,8 +148,14 @@ class SpectrogramTab(BaseSignalTab):
         self.viz_layout.addWidget(self.plot_spec)
         self.viz_layout.addWidget(self.plot_mini)
 
-        main_h_layout.addLayout(self.viz_layout, stretch=1)
-        main_h_layout.addWidget(self.sidebar, stretch=0)
+        # Apply visualization to left side
+        main_h_layout.addLayout(self.viz_layout, stretch=5)
+        
+        # Apply sidebar inside scroll area to right side
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.sidebar)
+        main_h_layout.addWidget(scroll_area, stretch=1)
 
     def browse_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Open IQ", "", "Complex (*.c32 *.cf32 *.fc32 *.f32 *.raw *.bin *.iq)")
