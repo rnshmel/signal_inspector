@@ -1,8 +1,9 @@
 import numpy as np
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
-                             QPushButton, QGroupBox, QCheckBox, QSlider)
-from PyQt5.QtCore import Qt
+                             QPushButton, QGroupBox, QCheckBox, QSlider, 
+                             QSpinBox)
+from PyQt5.QtCore import Qt, QTimer
 
 # Import the base class.
 from core.base_tab import BaseSignalTab
@@ -23,6 +24,11 @@ class DemodTab(BaseSignalTab):
         self.thresh_lines = []
         self.digital_color_name = 'Orange'
         
+        # Timer for debouncing heavy array slicing
+        self.update_timer = QTimer()
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self.refresh_plot_data)
+        
         self.init_ui()
 
     def init_ui(self):
@@ -37,10 +43,12 @@ class DemodTab(BaseSignalTab):
         self.plot_main = pg.PlotWidget()
         self.plot_main.setLabel('bottom', 'Time', units='s')
         self.plot_main.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_main.setDownsampling(auto=False)
-        self.plot_main.setClipToView(False)
-        self.plot_main.setMouseEnabled(x=True, y=False)
         self.plot_main.setBackground('#1e1e1e')
+        self.plot_main.setMouseEnabled(x=True, y=False)
+        
+        # Optimization
+        self.plot_main.setClipToView(True) 
+        self.plot_main.setDownsampling(auto=True, mode='peak')
         
         # Analog trace.
         self.curve_main = self.plot_main.plot(pen=pg.mkPen('g', width=3))
@@ -70,8 +78,10 @@ class DemodTab(BaseSignalTab):
         self.region = pg.LinearRegionItem()
         self.region.setZValue(10)
         self.plot_mini.addItem(self.region)
+        
+        # Connecting the visual navigation mapping
         self.region.sigRegionChanged.connect(self.update_zoom_from_region)
-        self.plot_main.sigRangeChanged.connect(self.update_region_from_zoom)
+        self.plot_main.sigRangeChanged.connect(self.on_range_changed)
         
         self.viz_layout.addWidget(self.plot_mini)
         main_h_layout.addLayout(self.viz_layout, stretch=1)
@@ -126,10 +136,27 @@ class DemodTab(BaseSignalTab):
         self.grp_view = QGroupBox("View Settings")
         self.view_layout = QVBoxLayout()
         self.grp_view.setLayout(self.view_layout)
+
+        self.lbl_active_points = QLabel("Visible Points: --")
+        self.lbl_active_points.setStyleSheet("font-size: 11px; color: #888; font-weight: bold;")
+        self.view_layout.addWidget(self.lbl_active_points)
         
         self.chk_light_mode = QCheckBox("Light Mode")
         self.chk_light_mode.stateChanged.connect(self.toggle_light_mode)
         self.view_layout.addWidget(self.chk_light_mode)
+        
+        # Interactive Threshold Setting
+        row_thresh = QHBoxLayout()
+        row_thresh.addWidget(QLabel("Plot Threshold:"))
+        self.spin_plot_thresh = QSpinBox()
+        self.spin_plot_thresh.setRange(1000, 5000000)
+        self.spin_plot_thresh.setSingleStep(10000)
+        self.spin_plot_thresh.setValue(10000)
+        self.spin_plot_thresh.setToolTip("Maximum points drawn 1:1 before peak-downsampling activates.")
+        self.spin_plot_thresh.valueChanged.connect(self.refresh_plot_data)
+        row_thresh.addWidget(self.spin_plot_thresh)
+        self.view_layout.addLayout(row_thresh)
+        
         self.sidebar_layout.addWidget(self.grp_view)
         self.sidebar_layout.addSpacing(10)
         
@@ -237,10 +264,7 @@ class DemodTab(BaseSignalTab):
         # Default active array is the raw array.
         self.demod_result = self.raw_demod_result.copy()
             
-        self.update_main_plot()
-        
-        # Update minimap.
-        # Decimate for speed.
+        # Update minimap. Peak decimate for pure speed on the mini overview.
         mini_step = max(1, len(self.demod_result) // 5000)
         mini_y = self.demod_result[::mini_step]
         mini_x = np.arange(len(mini_y)) * (mini_step / sr)
@@ -254,6 +278,8 @@ class DemodTab(BaseSignalTab):
         self.region.blockSignals(True)
         self.region.setRegion([start_t, end_t])
         self.region.blockSignals(False)
+        
+        # Calling setXRange triggers on_range_changed, which starts the timer
         self.plot_main.setXRange(start_t, end_t, padding=0)
         
         self.autoscale_view()
@@ -266,6 +292,22 @@ class DemodTab(BaseSignalTab):
         # Re-apply slicer if enabled.
         if self.chk_slicer.isChecked():
             self.setup_thresholds()
+            
+        # Provide immediate feedback instead of waiting 200ms
+        self.refresh_plot_data()
+
+    def on_range_changed(self, _, viewRange):
+        # Visually sync the minimap box immediately
+        self.region.blockSignals(True)
+        self.region.setRegion(viewRange[0])
+        self.region.blockSignals(False)
+        
+        # Restart the timer. If user is actively scrolling, this keeps resetting
+        self.update_timer.start(100)
+
+    def refresh_plot_data(self):
+        self.update_main_plot()
+        if self.chk_slicer.isChecked():
             self.update_digital_overlay()
 
     def update_main_plot(self):
@@ -274,18 +316,76 @@ class DemodTab(BaseSignalTab):
         sr = self.local_filtered_sr
         total_points = len(self.demod_result)
         
-        # Downsample for display.
-        # Note: magic number, need to remove at some point.
-        MAX_POINTS = 10000
-        if total_points > MAX_POINTS:
-            step = total_points // MAX_POINTS
-            y = self.demod_result[::step]
-            x = np.arange(len(y)) * (step / sr)
+        # Get the strict visible time window
+        view_range = self.plot_main.viewRange()[0]
+        min_t, max_t = view_range[0], view_range[1]
+        
+        # Add a buffer on either side so panning isn't instantly jarring
+        pad_t = (max_t - min_t) * 0.15
+        min_t = max(0, min_t - pad_t)
+        max_t = min(total_points / sr, max_t + pad_t)
+        
+        i_start = max(0, int(min_t * sr))
+        i_stop = min(total_points, int(max_t * sr))
+        
+        if i_stop <= i_start: return
+        
+        # Only extract the exact segment we need
+        view_y = self.demod_result[i_start:i_stop]
+        view_x = np.arange(i_start, i_stop) / sr
+        
+        # Decide if we pass raw points or let PyQtGraph apply Peak Downsampling
+        num_points = len(view_y)
+        if num_points > self.spin_plot_thresh.value():
+            self.plot_main.setDownsampling(auto=True, mode='peak')
+            self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [Downsampled]")
         else:
-            y = self.demod_result
-            x = np.arange(total_points) / sr
+            self.plot_main.setDownsampling(auto=False)
+            self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [1:1]")
             
-        self.curve_main.setData(x, y)
+        self.curve_main.setData(view_x, view_y)
+
+    def update_digital_overlay(self):
+        if self.demod_result is None or not self.chk_slicer.isChecked(): return
+        if not self.thresh_lines: return
+        
+        thresh_vals = sorted([line.value() for line in self.thresh_lines])
+        
+        txt = " | ".join([f"{v:.4f}" for v in thresh_vals])
+        self.lbl_thresh_info.setText(f"Thresholds: {txt}")
+        
+        sr = self.local_filtered_sr
+        total_points = len(self.demod_result)
+        
+        view_range = self.plot_main.viewRange()[0]
+        min_t, max_t = view_range[0], view_range[1]
+        
+        pad_t = (max_t - min_t) * 0.05
+        min_t = max(0, min_t - pad_t)
+        max_t = min(total_points / sr, max_t + pad_t)
+        
+        i_start = max(0, int(min_t * sr))
+        i_stop = min(total_points, int(max_t * sr))
+        
+        if i_stop <= i_start: return
+        
+        view_y = self.demod_result[i_start:i_stop]
+        view_x = np.arange(i_start, i_stop) / sr
+        
+        # Digitize only the visible data
+        view_symbols = np.digitize(view_y, thresh_vals)
+        
+        mapped_y = np.zeros_like(view_y)
+        unique_syms = np.unique(view_symbols)
+        
+        # Map symbols back to analog levels for the overlay trace.
+        for s in unique_syms:
+            mask = (view_symbols == s)
+            if np.any(mask):
+                val = np.median(view_y[mask])
+                mapped_y[mask] = val
+                
+        self.curve_digital.setData(view_x, mapped_y)
 
     def toggle_filter_box(self, checked):
         if checked:
@@ -317,11 +417,7 @@ class DemodTab(BaseSignalTab):
             # Apply filter strictly to the RAW data to avoid compound filtering.
             self.demod_result = dsp.apply_matched_filter(self.raw_demod_result, f_type, length_samples)
             
-        self.update_main_plot()
-        
-        # Auto-update slicer overlay to reflect the smoothed data
-        if self.chk_slicer.isChecked():
-            self.update_digital_overlay()
+        self.refresh_plot_data()
 
     def get_adaptive_color(self, name):
         # Returns hex color tuple (dark_mode_hex, light_mode_hex).
@@ -441,57 +537,18 @@ class DemodTab(BaseSignalTab):
             if val >= upper_neighbor.value() - margin:
                 moved_line.setValue(upper_neighbor.value() - margin)
 
-    def update_digital_overlay(self):
-        if self.demod_result is None or not self.chk_slicer.isChecked(): return
-        if not self.thresh_lines: return
-        
-        thresh_vals = sorted([line.value() for line in self.thresh_lines])
-        
-        # Digitize (slice) the data locally for preview.
-        full_symbols = np.digitize(self.demod_result, thresh_vals)
-        
-        txt = " | ".join([f"{v:.4f}" for v in thresh_vals])
-        self.lbl_thresh_info.setText(f"Thresholds: {txt}")
-        
-        # Prepare visualization data.
-        sr = self.local_filtered_sr
-        MAX_POINTS = 10000
-        total_points = len(self.demod_result)
-        
-        if total_points > MAX_POINTS:
-            step = total_points // MAX_POINTS
-            view_data = self.demod_result[::step]
-            view_symbols = full_symbols[::step]
-            x_axis = np.arange(len(view_data)) * (step / sr)
-        else:
-            view_data = self.demod_result
-            view_symbols = full_symbols
-            x_axis = np.arange(total_points) / sr
-            
-        mapped_y = np.zeros_like(view_data)
-        unique_syms = np.unique(view_symbols)
-        
-        # Map symbols back to analog levels for the overlay trace.
-        for s in unique_syms:
-            mask = (view_symbols == s)
-            if np.any(mask):
-                val = np.median(view_data[mask])
-                mapped_y[mask] = val
-                
-        self.curve_digital.setData(x_axis, mapped_y)
-
     def autoscale_view(self):
         if self.demod_result is None: return
-        x_data, y_data = self.curve_main.getData()
-        if x_data is None: return
         
         min_t, max_t = self.region.getRegion()
-        i_start = np.searchsorted(x_data, min_t)
-        i_stop = np.searchsorted(x_data, max_t)
+        sr = self.local_filtered_sr
+        
+        i_start = max(0, int(min_t * sr))
+        i_stop = min(len(self.demod_result), int(max_t * sr))
         
         if i_stop <= i_start: return
         
-        view_y = y_data[i_start:i_stop]
+        view_y = self.demod_result[i_start:i_stop]
         if len(view_y) == 0: return
         
         y_min = np.min(view_y)
@@ -504,9 +561,5 @@ class DemodTab(BaseSignalTab):
 
     def update_zoom_from_region(self):
         min_x, max_x = self.region.getRegion()
+        # Modifying XRange here triggers on_range_changed internally
         self.plot_main.setXRange(min_x, max_x, padding=0)
-
-    def update_region_from_zoom(self, _, viewRange):
-        self.region.blockSignals(True)
-        self.region.setRegion(viewRange[0])
-        self.region.blockSignals(False)

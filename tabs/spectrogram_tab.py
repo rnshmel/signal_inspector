@@ -170,7 +170,7 @@ class SpectrogramTab(BaseSignalTab):
             
             self.lbl_file_info.setText(f"{len(self.local_iq_handle):,} Samples\n{self.local_duration:.4f} Sec")
             self.update_minimap()
-            self.region.setRegion([0, min(0.25, self.local_duration)])
+            self.region.setRegion([0, min(0.15, self.local_duration)])
             self.refresh_spectrogram()
             self.btn_stage.setEnabled(True)
             
