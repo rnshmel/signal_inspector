@@ -1,6 +1,6 @@
 # Signal Inspector
 
-**Version:** 1.3.0
+**Version:** 1.3.1
  
 A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt5, NumPy, and SciPy.
 
@@ -46,19 +46,16 @@ The Inspector operates as a linear pipeline. Data does not automatically flow be
 
 ### 1. Spectrogram View (Source)
 The entry point for raw data. Only complex floating-point 32-bit data is supported.
-- **Controls:** Open IQ recordings.
-- **Memory Safety:** Uses `np.memmap` to handle multi-gigabyte files without crashing RAM.
-- **Mosaic View:** If zoomed out on massive files, enables a "Mosaic" stride to visualize the entire file duration safely.
-- **Action:** Click **"STAGE FILE"** to make the file handle available to the Tuner.
+- **Controls:** Open IQ recordings pan across a waterfall.
+- **Mosaic View:** If zoomed out on massive files, you can enable a "Mosaic" stride to visualize the entire file duration wthout taxing RAM.
 
 ### 2. Tuner and Filter (Extraction)
 Isolates a specific signal of interest from the wideband recording.
 - **Input:** Raw IQ File Handle (from Tab 1).
 - **Time Selection:** Vertical sliders select the time slice to process.
-- **Frequency Selection:** Horizontal sliders select the carrier frequency and bandwidth.
+- **Frequency Selection:** Horizontal sliders select the offset frequency and bandwidth.
 - **DSP:** Mixes the selection to Baseband (0 Hz) and applies a low-pass filter.
 - **Export:** (Optional) Save specific raw or filtered fragments to disk as `.cf32` for external tools.
-- **Action:** Click **"Apply"** to preview, then **"STAGE OUTPUT"** to save the filtered samples to memory.
 
 ### 3. Demodulator (Analog)
 Converts complex IQ samples into real-valued analog signals.
@@ -67,14 +64,12 @@ Converts complex IQ samples into real-valued analog signals.
   - **Amplitude:** Magnitude detection (ASK).
   - **Frequency:** Phase differencing (FSK).
 - **Slicer Preview:** Overlay threshold lines on the analog waveform to visualize how bits will be decided.
-- **Action:** Click **"STAGE OUTPUT"** to commit the analog demodulation and threshold settings.
 
 ### 4. Symbol Timing Recovery (Digital)
 Converts analog signals into discrete symbols (0, 1, 2, 3, etc) via user-aided symbol recovery.
 - **Input:** Demodulated Analog Signal + Thresholds (from Tab 3).
 - **Manual Clocking:** Drag the "Clock Region" box to align red tick marks with the edges of your symbols.
 - **Auto-Sync (Beta):** After manually aligning 4+ symbols, the tool can algorithmically estimate the clock for the rest of the burst.
-- **Action:** Click **"STAGE OUTPUT"** to extract the discrete symbols.
 
 ### 5. Data Inspector (Analysis)
 Basic reverse engineering.
@@ -83,7 +78,7 @@ Basic reverse engineering.
   1. **Line Logic:** Invert symbols (Active Low) or apply Differential Decoding (NRZ-I / Modulo subtraction).
   2. **Symbol Mapping:** Map discrete integers (0, 1, 2, 3) to bit patterns (e.g., `3 -> 10`, `0 -> 00`).
   3. **Line Coding:** Decode Manchester (IEEE or Thomas).
-- **Analysis:** View bits as binary stream or Hex dump. Highlight hex bytes to see corresponding bits. Search for preambles/sync words.
+- **Analysis:** View bits as binary stream or Hex dump. Highlight hex bytes to see corresponding bits. Search for preambles and sync words.
 
 ---
 
@@ -96,7 +91,7 @@ The project follows a modular pattern where:
 - **Utils (`utils/`):** All pure DSP math functions (SciPy/NumPy).
 
 ### The Data Backbone: `SignalContext`
-Data is passed between tabs via a shared singleton-like object called `SignalContext`. Data is categorized by "Generations":
+Data is passed between tabs via a shared object called `SignalContext`. Data is categorized by "Generations":
 
 | Generation | Data Type | Source | Description |
 | :--- | :--- | :--- | :--- |

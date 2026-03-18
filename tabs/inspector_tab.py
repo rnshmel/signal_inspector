@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
                              QRadioButton, QSplitter, QLineEdit, QFileDialog,
                              QMessageBox, QCheckBox, QComboBox, QSpinBox, QScrollArea)
 from PyQt5.QtGui import QFont, QTextCursor, QColor, QSyntaxHighlighter, QTextCharFormat
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 from core.base_tab import BaseSignalTab
 import utils.dsp_lib as dsp
@@ -44,6 +44,12 @@ class InspectorTab(BaseSignalTab):
         self.is_syncing = False
         self.stashed_bits = "" # Holds our in-memory saved state
         
+        # 500 ms delay before rebuilding hex view
+        self.hex_timer = QTimer()
+        self.hex_timer.setSingleShot(True)
+        self.hex_timer.setInterval(500)
+        self.hex_timer.timeout.connect(self.update_hex_view)
+        
         self.init_ui()
 
     def init_ui(self):
@@ -78,7 +84,9 @@ class InspectorTab(BaseSignalTab):
         self.txt_bits = QPlainTextEdit()
         self.txt_bits.setFont(QFont("Monospace", 10))
         self.txt_bits.setStyleSheet("background-color: #1e1e1e; color: #00FF00;")
-        self.txt_bits.textChanged.connect(self.update_hex_view)
+        
+        # Point the textChanged signal to the timer instead of update_hex_view directly
+        self.txt_bits.textChanged.connect(self.hex_timer.start)
         self.txt_bits.cursorPositionChanged.connect(self.sync_highlight_to_hex)
         self.grp_bits_layout.addWidget(self.txt_bits)
         
@@ -321,6 +329,7 @@ class InspectorTab(BaseSignalTab):
         self.txt_bits.setPlainText(full_text)
         self.txt_bits.blockSignals(False)
         
+        # Bypassing the timer for the initial load
         self.update_hex_view()
 
     def stash_state(self):
@@ -397,7 +406,12 @@ class InspectorTab(BaseSignalTab):
             except:
                 pass 
         
+        self.table_hex.setUpdatesEnabled(False)
         self.table_hex.blockSignals(True)
+
+        self.table_hex.clearContents()
+        self.table_hex.setRowCount(0)
+        
         self.table_hex.setRowCount((len(byte_data) + 15) // 16)
         
         for row in range(self.table_hex.rowCount()):
@@ -417,7 +431,9 @@ class InspectorTab(BaseSignalTab):
                     self.table_hex.setItem(row, col + 1, QTableWidgetItem(""))
             
             self.table_hex.setItem(row, 17, QTableWidgetItem(ascii_str))
+            
         self.table_hex.blockSignals(False)
+        self.table_hex.setUpdatesEnabled(True)
 
     def sync_highlight_to_hex(self):
         if self.is_syncing: return
