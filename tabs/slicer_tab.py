@@ -181,7 +181,7 @@ class SlicerTab(BaseSignalTab):
         row_tol.addWidget(QLabel("Loop Gain (\u03B1):"))
         self.spin_alpha = QDoubleSpinBox()
         self.spin_alpha.setRange(0.01, 0.99)
-        self.spin_alpha.setValue(0.15) 
+        self.spin_alpha.setValue(0.25) 
         self.spin_alpha.setSingleStep(0.05)
         row_tol.addWidget(self.spin_alpha)
         self.auto_layout.addLayout(row_tol)
@@ -558,7 +558,7 @@ class SlicerTab(BaseSignalTab):
         count = self.spin_symbols.value()
         if count >= 4:
             self.btn_auto_sync.setEnabled(True)
-            self.btn_auto_sync.setText(f"Auto-Sync (Next: {count+1})")
+            self.btn_auto_sync.setText(f"Auto-Sync")
         else:
             self.btn_auto_sync.setEnabled(False)
             self.btn_auto_sync.setText("Auto-Sync (Align 4+)")

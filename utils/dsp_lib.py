@@ -215,7 +215,7 @@ def _generate_rrc(length, beta):
 
 # Extracts clock timings using a proportional phase-locked loop (PLL) on zero-crossings.
 # Assumes analog_data is already DC-centered (CFO corrected).
-def find_clock_sync(analog_data, sr, start_time, current_width, current_count, alpha=0.15, limit_time=None):
+def find_clock_sync(analog_data, sr, start_time, current_width, current_count, alpha=0.25, limit_time=None):
     # Extracts clock timings using a proportional phase-locked loop (PLL) on zero-crossings.
     # Assumes analog_data is already DC-centered (CFO corrected).
 
@@ -303,50 +303,6 @@ def find_clock_sync(analog_data, sr, start_time, current_width, current_count, a
         added_symbols += 1
         
     return True, np.array(clock_centers), manual_boundary
-
-def invert_symbols(symbols, modulus):
-    return (modulus - 1) - symbols
-
-def decode_differential(symbols, modulus):
-    # Create output array of same shape.
-    diff = np.zeros_like(symbols)
-    
-    # Calculate diff.
-    # We slice to vectorize: symbols[1:] - symbols[:-1]
-    # We use modulo to handle wrapping (ex. 0 - 1 = -1 --> 3 in mod 4)
-    d = np.mod(symbols[1:] - symbols[:-1], modulus)
-    
-    # Assign to output, leaving first element as 0 (default).
-    diff[1:] = d
-    
-    return diff
-
-def decode_manchester_string(bit_string, scheme):
-    # Ensure even length
-    if len(bit_string) % 2 != 0:
-        bit_string = bit_string[:-1]
-    
-    # We process the string as chunks of 2.
-    # Simple list comprehension approach, easy in Python.
-    pairs = [bit_string[i:i+2] for i in range(0, len(bit_string), 2)]
-    decoded = []
-    
-    if scheme == 'IEEE':
-        # 10 = 1 and 01 -= 0
-        map_table = {'10': '1', '01': '0'}
-    elif scheme == 'Thomas':
-        # 01 = 1 and 10 = 0
-        map_table = {'01': '1', '10': '0'}
-    else:
-        # Fallback
-        return bit_string
-        
-    for p in pairs:
-        # E for violation (00 or 11).
-        # Note: indicates shifted symbols (out-of-phase).
-        decoded.append(map_table.get(p, 'E'))
-        
-    return "".join(decoded)
 
 def remove_dc_bias(analog_data, thresholds):
     # Centers the analog data around 0.0 using the middle threshold (CFO correction).
