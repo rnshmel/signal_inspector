@@ -158,7 +158,7 @@ class SpectrogramTab(BaseSignalTab):
         main_h_layout.addWidget(scroll_area, stretch=1)
 
     def browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open IQ", "", "Complex (*.c32 *.cf32 *.fc32 *.f32 *.raw *.bin *.iq)")
+        fname, _ = QFileDialog.getOpenFileName(self, "Open IQ", "", "Complex (*.c32 *.cf32 *.fc32 *.f32 *.raw *.bin *.iq *.sigmf-data)")
         if fname:
             self.current_file_path = fname
             self.txt_path.setText(os.path.basename(fname))
