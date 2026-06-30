@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This ensures the script works regardless of where it is called from.
+# This ensures the script works regardless of where it is called from
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # Change to the script's directory so all relative paths work
@@ -23,7 +23,7 @@ show_help() {
     echo ""
     echo "Available Apps:"
     if [ -d "$APPS_DIR" ]; then
-        ls "$APPS_DIR"/*.py | xargs -n 1 basename | sed 's/^/  - /'
+        ls "$APPS_DIR"/*.py 2>/dev/null | xargs -n 1 basename | sed 's/^/  - /' || echo "  (No python apps found in $APPS_DIR)"
     else
         echo "  (No apps directory found)"
     fi
@@ -71,11 +71,20 @@ if [ -z "$PYTHON_CMD" ]; then
     exit 1
 fi
 
-# 4. Setup/check venv
 if [ ! -d "$VENV_DIR" ]; then
+    echo "--- Checking if the 'venv' module is available ---"
+    if ! "$PYTHON_CMD" -c "import venv" &> /dev/null; then
+        echo "Error: The 'venv' module is not available for $PYTHON_CMD."
+        echo "On Debian/Ubuntu systems, you might need to install it manually:"
+        echo "  sudo apt install ${PYTHON_CMD}-venv"
+        exit 1
+    fi
+
     echo "--- Creating new virtual environment ($VENV_DIR) ---"
+    # If the creation fails we need to clean up the partially created directory
     if ! "$PYTHON_CMD" -m venv "$VENV_DIR"; then
-        echo "Error: Failed to create venv using $PYTHON_CMD."
+        echo "Error: Failed to create venv using $PYTHON_CMD. Cleaning up."
+        rm -rf "$VENV_DIR"
         exit 1
     fi
 
@@ -100,7 +109,7 @@ if [ ! -d "$VENV_DIR" ]; then
         fi
     fi
 else
-    # Exit
+    # Venv already exists just activate it
     source "$VENV_DIR/bin/activate"
 fi
 

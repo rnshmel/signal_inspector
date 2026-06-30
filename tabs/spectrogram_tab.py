@@ -101,9 +101,12 @@ class SpectrogramTab(BaseSignalTab):
         self.cb_fft.currentTextChanged.connect(self.refresh_spectrogram)
         self.sidebar_layout.addWidget(self.cb_fft)
         
-        self.chk_overlap = QCheckBox("High Res (Overlap)")
-        self.chk_overlap.stateChanged.connect(self.refresh_spectrogram)
-        self.sidebar_layout.addWidget(self.chk_overlap)
+        self.sidebar_layout.addWidget(QLabel("Overlap Factor:"))
+        self.cb_overlap = QComboBox()
+        self.cb_overlap.addItems(["0", "2", "4", "8", "16", "32"])
+        self.cb_overlap.setCurrentText("0")
+        self.cb_overlap.currentTextChanged.connect(self.refresh_spectrogram)
+        self.sidebar_layout.addWidget(self.cb_overlap)
 
         self.sidebar_layout.addWidget(QLabel("Color Map:"))
         self.cb_cmap = QComboBox()
@@ -158,7 +161,7 @@ class SpectrogramTab(BaseSignalTab):
         main_h_layout.addWidget(scroll_area, stretch=1)
 
     def browse_file(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open IQ", "", "Complex (*.c32 *.cf32 *.fc32 *.f32 *.raw *.bin *.iq *.sigmf-data)")
+        fname, _ = QFileDialog.getOpenFileName(self, "Open IQ", "", "All Files (*)")
         if fname:
             self.current_file_path = fname
             self.txt_path.setText(os.path.basename(fname))
@@ -197,8 +200,13 @@ class SpectrogramTab(BaseSignalTab):
         self.context.raw_iq_path = self.current_file_path
         
         fft_size = int(self.cb_fft.currentText())
+        overlap_factor = int(self.cb_overlap.currentText())
+        
+        # Calculate actual overlap points based on the factor (e.g., factor 4 = 75% overlap)
+        overlap = 0 if overlap_factor == 0 else fft_size - (fft_size // overlap_factor)
+        
         self.context.viz_fft_size = fft_size
-        self.context.viz_overlap = (fft_size // 2) if self.chk_overlap.isChecked() else 0
+        self.context.viz_overlap = overlap
         self.context.viz_levels = self.hist_widget.getLevels()
         self.context.viz_lut = self.hist_widget.gradient.getLookupTable(256)
         
@@ -217,8 +225,10 @@ class SpectrogramTab(BaseSignalTab):
         if self.local_iq_handle is None: return
         min_t, max_t = self.region.getRegion()
         sr = float(self.txt_sr.text())
+        
         fft_size = int(self.cb_fft.currentText())
-        overlap = fft_size // 2 if self.chk_overlap.isChecked() else 0
+        overlap_factor = int(self.cb_overlap.currentText())
+        overlap = 0 if overlap_factor == 0 else fft_size - (fft_size // overlap_factor)
         
         i_start = max(0, int(min_t * sr))
         i_stop = min(len(self.local_iq_handle), int(max_t * sr))
