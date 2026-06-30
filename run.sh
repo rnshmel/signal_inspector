@@ -88,7 +88,6 @@ if [ ! -d "$VENV_DIR" ]; then
         exit 1
     fi
 
-    # Activate
     source "$VENV_DIR/bin/activate"
     
     echo "--- Upgrading pip and build tools ---"
@@ -113,10 +112,8 @@ else
     source "$VENV_DIR/bin/activate"
 fi
 
-# Start
 echo "--- Launching $TARGET_App ---"
 
-# PYTHONPATH needs to be the script directory (which we CD into).
 export PYTHONPATH=$PWD
 
 python "$TARGET_PATH"
