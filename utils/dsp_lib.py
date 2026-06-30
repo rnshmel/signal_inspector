@@ -1,6 +1,79 @@
 import numpy as np
 import scipy.signal
 
+class MappedIQWrapper:
+    # Proxy class that wraps integer numpy memmaps.
+
+    def __init__(self, filepath, fmt):
+        self.fmt = fmt.split()[0]
+        
+        if self.fmt == 'cf32':
+            self._mmap = np.memmap(filepath, dtype=np.complex64, mode='r')
+            self.length = len(self._mmap)
+        elif self.fmt == 'cs16':
+            self._mmap = np.memmap(filepath, dtype=np.int16, mode='r')
+            self.length = len(self._mmap) // 2
+        elif self.fmt == 'cs8':
+            self._mmap = np.memmap(filepath, dtype=np.int8, mode='r')
+            self.length = len(self._mmap) // 2
+        elif self.fmt == 'cu8':
+            self._mmap = np.memmap(filepath, dtype=np.uint8, mode='r')
+            self.length = len(self._mmap) // 2
+        else:
+            raise ValueError(f"Unknown format: {self.fmt}")
+            
+    def __len__(self):
+        return self.length
+        
+    def __getitem__(self, key):
+        # Native complex float 32
+        if self.fmt == 'cf32':
+            return self._mmap[key]
+            
+        # Intercept and map slicing operations
+        if isinstance(key, slice):
+            start = key.start if key.start is not None else 0
+            stop = key.stop if key.stop is not None else self.length
+            step = key.step if key.step is not None else 1
+            
+            if start < 0: start += self.length
+            if stop < 0: stop += self.length
+            
+            stop = min(stop, self.length)
+            
+            # Map complex to real interleaved bounds
+            start_r = start * 2
+            stop_r = stop * 2
+            step_r = step * 2
+            
+            i_data = self._mmap[start_r : stop_r : step_r].astype(np.float32)
+            q_data = self._mmap[start_r + 1 : stop_r : step_r].astype(np.float32)
+            
+            # Reconstruct and scale
+            if self.fmt == 'cs16':
+                return ((i_data + 1j * q_data) / 32768.0).astype(np.complex64)
+            elif self.fmt == 'cs8':
+                return ((i_data + 1j * q_data) / 128.0).astype(np.complex64)
+            elif self.fmt == 'cu8':
+                return (((i_data - 127.5) + 1j * (q_data - 127.5)) / 128.0).astype(np.complex64)
+
+        elif isinstance(key, int):
+            if key < 0: key += self.length
+            if key >= self.length or key < 0: raise IndexError("Index out of bounds")
+            
+            idx = key * 2
+            i_val = float(self._mmap[idx])
+            q_val = float(self._mmap[idx+1])
+            
+            if self.fmt == 'cs16':
+                return np.complex64((i_val + 1j * q_val) / 32768.0)
+            elif self.fmt == 'cs8':
+                return np.complex64((i_val + 1j * q_val) / 128.0)
+            elif self.fmt == 'cu8':
+                return np.complex64(((i_val - 127.5) + 1j * (q_val - 127.5)) / 128.0)
+        else:
+            raise TypeError("Invalid index type")
+
 def compute_spectrogram(data, sr, fft_size=1024, overlap=0):
     # Computes a magnitude spectrogram in dB.
     # Returns (Sxx_db, extent).

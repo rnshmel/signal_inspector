@@ -54,13 +54,21 @@ class SpectrogramTab(BaseSignalTab):
         layout_file.addWidget(self.txt_path, 0, 1)
         layout_file.addWidget(btn_browse, 0, 2)
         
+        self.cb_dtype = QComboBox()
+        self.cb_dtype.addItems(["cf32 (Complex Float 32)", 
+                                "cs16 (Complex Int 16)", 
+                                "cs8 (Complex Int 8)", 
+                                "cu8 (Complex Unsigned 8)"])
+        layout_file.addWidget(QLabel("Data Type:"), 1, 0)
+        layout_file.addWidget(self.cb_dtype, 1, 1, 1, 2)
+
         self.txt_sr = QLineEdit("2000000")
-        layout_file.addWidget(QLabel("Sample Rate:"), 1, 0)
-        layout_file.addWidget(self.txt_sr, 1, 1, 1, 2)
+        layout_file.addWidget(QLabel("Sample Rate:"), 2, 0)
+        layout_file.addWidget(self.txt_sr, 2, 1, 1, 2)
 
         self.btn_load_local = QPushButton("LOAD DATA")
         self.btn_load_local.clicked.connect(self.load_local_data)
-        layout_file.addWidget(self.btn_load_local, 2, 0, 1, 3)
+        layout_file.addWidget(self.btn_load_local, 3, 0, 1, 3)
 
         self.sidebar_layout.addWidget(grp_file)
         self.sidebar_layout.addSpacing(10)
@@ -173,7 +181,11 @@ class SpectrogramTab(BaseSignalTab):
 
         try:
             sr_val = float(self.txt_sr.text())
-            self.local_iq_handle = np.memmap(self.current_file_path, dtype=np.complex64, mode='r')
+            
+            # Instantiate the wrapper instead of raw memmap
+            fmt_str = self.cb_dtype.currentText()
+            self.local_iq_handle = dsp.MappedIQWrapper(self.current_file_path, fmt_str)
+            
             self.local_duration = len(self.local_iq_handle) / sr_val
             
             self.lbl_file_info.setText(f"{len(self.local_iq_handle):,} Samples\n{self.local_duration:.4f} Sec")
@@ -200,9 +212,8 @@ class SpectrogramTab(BaseSignalTab):
         self.context.raw_iq_path = self.current_file_path
         
         fft_size = int(self.cb_fft.currentText())
-        overlap_factor = int(self.cb_overlap.currentText())
         
-        # Calculate actual overlap points based on the factor (e.g., factor 4 = 75% overlap)
+        overlap_factor = int(self.cb_overlap.currentText())
         overlap = 0 if overlap_factor == 0 else fft_size - (fft_size // overlap_factor)
         
         self.context.viz_fft_size = fft_size
