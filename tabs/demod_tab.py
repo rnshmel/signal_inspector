@@ -58,6 +58,41 @@ class DemodTab(BaseSignalTab):
         self.curve_digital = self.plot_main.plot(pen=self.pen_digital)
         self.curve_digital.setVisible(False)
 
+        overlay_layout = QVBoxLayout(self.plot_main)
+        overlay_layout.setContentsMargins(0, 10, 10, 0)
+        
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1) # Pushes buttons to the right
+        
+        self.btn_y_in = QPushButton("+")
+        self.btn_y_out = QPushButton("-")
+        
+        btn_style = """
+            QPushButton {
+                background-color: rgba(60, 60, 60, 150);
+                color: white;
+                font-weight: bold;
+                font-size: 18px;
+                border-radius: 4px;
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+            }
+            QPushButton:hover { background-color: rgba(100, 100, 100, 200); }
+        """
+        self.btn_y_in.setStyleSheet(btn_style)
+        self.btn_y_out.setStyleSheet(btn_style)
+        
+        self.btn_y_in.clicked.connect(self.manual_y_zoom_in)
+        self.btn_y_out.clicked.connect(self.manual_y_zoom_out)
+        
+        btn_row.addWidget(self.btn_y_in)
+        btn_row.addWidget(self.btn_y_out)
+        
+        overlay_layout.addLayout(btn_row)
+        overlay_layout.addStretch(1) # Pushes the row to the top
+
         # Filter box.
         self.filter_region = pg.LinearRegionItem(brush=pg.mkBrush(255, 255, 255, 50))
         self.filter_region.setZValue(10)
@@ -74,7 +109,7 @@ class DemodTab(BaseSignalTab):
         self.plot_mini.hideAxis('left')
         self.plot_mini.setBackground('#1e1e1e')
         self.curve_mini = self.plot_mini.plot(pen=pg.mkPen('w', width=1))
-        self.region = pg.LinearRegionItem(pen=pg.mkPen('w', width=3), hoverPen=pg.mkPen('y', width=5))
+        self.region = pg.LinearRegionItem(pen=pg.mkPen('w', width=4), hoverPen=pg.mkPen('y', width=8))
         self.region.setZValue(10)
         self.plot_mini.addItem(self.region)
         
@@ -305,7 +340,7 @@ class DemodTab(BaseSignalTab):
         # Reset navigation region.
         duration = len(self.demod_result) / sr
         self.plot_mini.setXRange(0, duration) 
-        start_t, end_t = 0, duration * 0.25 
+        start_t, end_t = 0, duration * 0.15
         
         self.region.blockSignals(True)
         self.region.setRegion([start_t, end_t])
@@ -624,3 +659,19 @@ class DemodTab(BaseSignalTab):
     def update_zoom_from_region(self):
         min_x, max_x = self.region.getRegion()
         self.plot_main.setXRange(min_x, max_x, padding=0)
+
+    def manual_y_zoom_in(self):
+        self.chk_auto_autoscale.setChecked(False)
+        y_min, y_max = self.plot_main.viewRange()[1]
+
+        span = y_max - y_min
+        delta = span * 0.15
+        self.plot_main.setYRange(y_min + (delta / 2.0), y_max - (delta / 2.0), padding=0)
+
+    def manual_y_zoom_out(self):
+        self.chk_auto_autoscale.setChecked(False)
+        y_min, y_max = self.plot_main.viewRange()[1]   
+
+        span = y_max - y_min
+        delta = span * 0.15
+        self.plot_main.setYRange(y_min - (delta / 2.0), y_max + (delta / 2.0), padding=0)
