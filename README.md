@@ -1,6 +1,6 @@
 # Signal Inspector
 
-**Version:** 1.5.1
+**Version:** 1.5.2
  
 A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt5, NumPy, and SciPy.
 
@@ -68,7 +68,7 @@ Converts complex IQ samples into real-valued analog signals.
 ### 4. Symbol Timing Recovery (Digital)
 Converts analog signals into discrete symbols (0, 1, 2, 3, etc) via user-aided symbol recovery.
 - **Input:** Demodulated Analog Signal + Thresholds (from Tab 3).
-- **Manual Clocking:** Drag the "Clock Region" box to align red tick marks with the edges of your symbols.
+- **Manual Clocking:** Drag the "Clock Region" box to align with the edges of your symbols.
 - **Auto-Sync (Beta):** After manually aligning 4+ symbols, the tool can algorithmically estimate the clock for the rest of the burst.
 
 ### 5. Data Inspector (Analysis)

@@ -74,8 +74,7 @@ class DemodTab(BaseSignalTab):
         self.plot_mini.hideAxis('left')
         self.plot_mini.setBackground('#1e1e1e')
         self.curve_mini = self.plot_mini.plot(pen=pg.mkPen('w', width=1))
-        
-        self.region = pg.LinearRegionItem()
+        self.region = pg.LinearRegionItem(pen=pg.mkPen('w', width=3), hoverPen=pg.mkPen('y', width=5))
         self.region.setZValue(10)
         self.plot_mini.addItem(self.region)
         
@@ -104,9 +103,16 @@ class DemodTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.cb_mode)
         self.sidebar_layout.addSpacing(10)
         
+        autoscale_layout = QHBoxLayout()
         self.btn_autoscale = QPushButton("Auto Scale Y-Axis")
         self.btn_autoscale.clicked.connect(self.autoscale_view)
-        self.sidebar_layout.addWidget(self.btn_autoscale)
+        autoscale_layout.addWidget(self.btn_autoscale)
+        
+        self.chk_auto_autoscale = QCheckBox("Auto auto-scale")
+        self.chk_auto_autoscale.setChecked(True)
+        autoscale_layout.addWidget(self.chk_auto_autoscale)
+        
+        self.sidebar_layout.addLayout(autoscale_layout)
         self.sidebar_layout.addSpacing(20)
 
         self.grp_filter = QGroupBox("Matched Filtering (Optional)")
@@ -332,7 +338,12 @@ class DemodTab(BaseSignalTab):
         self.update_timer.start(100)
 
     def refresh_plot_data(self):
+        # Automatically adjust Y-Axis if enabled before drawing points
+        if getattr(self, 'chk_auto_autoscale', None) and self.chk_auto_autoscale.isChecked():
+            self.autoscale_view()
+            
         self.update_main_plot()
+        
         if self.chk_slicer.isChecked():
             self.update_digital_overlay()
 
@@ -432,6 +443,14 @@ class DemodTab(BaseSignalTab):
 
     def toggle_filter_box(self, checked):
         if checked:
+            view_range = self.plot_main.viewRange()[0]
+            min_x, max_x = view_range[0], view_range[1]
+            view_width = max_x - min_x
+            
+            box_width = view_width * 0.20
+            center_x = min_x + (view_width / 2.0)
+            self.filter_region.setRegion([center_x - (box_width / 2.0), center_x + (box_width / 2.0)])
+            
             self.filter_region.show()
             self.update_filter_label()
         else:
