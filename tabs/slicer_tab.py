@@ -271,6 +271,16 @@ class SlicerTab(BaseSignalTab):
         self.lbl_auto_status = QLabel("Status: Manual Mode")
         self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
         self.auto_layout.addWidget(self.lbl_auto_status)
+
+        self.lbl_baud_metric = QLabel("")
+        self.lbl_baud_metric.setStyleSheet("color: #0277BD; font-size: 14pt; font-weight: bold;")
+        self.lbl_baud_metric.setVisible(False)
+        self.auto_layout.addWidget(self.lbl_baud_metric)
+
+        self.lbl_sps_metric = QLabel("")
+        self.lbl_sps_metric.setStyleSheet("color: #0277BD; font-size: 14pt; font-weight: bold;")
+        self.lbl_sps_metric.setVisible(False)
+        self.auto_layout.addWidget(self.lbl_sps_metric)
         
         self.sidebar_layout.addWidget(self.grp_auto)
         
@@ -569,6 +579,17 @@ class SlicerTab(BaseSignalTab):
             total = len(centers)
             self.lbl_auto_status.setText(f"Status: PLL Mode (Total Sym: {total})")
             self.lbl_auto_status.setStyleSheet("color: #2E7D32; font-weight: bold;")
+
+            if total > 1:
+                diffs = np.diff(centers)
+                median_duration = float(np.median(diffs))
+                if median_duration > 0:
+                    baud = 1.0 / median_duration
+                    sps = median_duration * self.local_sr
+                    self.lbl_baud_metric.setText(f"Median Baud: {baud:.2f}")
+                    self.lbl_baud_metric.setVisible(True)
+                    self.lbl_sps_metric.setText(f"SPS: {sps:.2f}")
+                    self.lbl_sps_metric.setVisible(True)
             
             self.refresh_plot_data()
             self.extract_symbols()
@@ -589,6 +610,11 @@ class SlicerTab(BaseSignalTab):
         
         self.lbl_auto_status.setText("Status: Manual Mode")
         self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
+        
+        self.lbl_baud_metric.setText("")
+        self.lbl_baud_metric.setVisible(False)
+        self.lbl_sps_metric.setText("")
+        self.lbl_sps_metric.setVisible(False)
         
         self.check_auto_enable()
         self.refresh_plot_data()
