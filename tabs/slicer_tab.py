@@ -88,6 +88,61 @@ class SlicerTab(BaseSignalTab):
         self.plot_main.addItem(self.stop_line)
         
         self.viz_layout.addWidget(self.plot_main)
+
+        # Floating Y-Axis Controls Overlay
+        overlay_layout = QVBoxLayout(self.plot_main)
+        overlay_layout.setContentsMargins(0, 10, 10, 0)
+        
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1) # Pushes buttons to the right
+        
+        self.btn_locate_cursor = QPushButton("Locate Cursor")
+        self.btn_y_in = QPushButton("+")
+        self.btn_y_out = QPushButton("-")
+        
+        locate_style = """
+            QPushButton {
+                background-color: rgba(60, 60, 60, 150);
+                color: white;
+                font-weight: bold;
+                font-size: 13px;
+                border-radius: 4px;
+                padding: 0 10px;
+                min-height: 30px;
+                max-height: 30px;
+            }
+            QPushButton:hover { background-color: rgba(100, 100, 100, 200); }
+        """
+        self.btn_locate_cursor.setStyleSheet(locate_style)
+        
+        btn_style = """
+            QPushButton {
+                background-color: rgba(60, 60, 60, 150);
+                color: white;
+                font-weight: bold;
+                font-size: 18px;
+                border-radius: 4px;
+                min-width: 30px;
+                max-width: 30px;
+                min-height: 30px;
+                max-height: 30px;
+            }
+            QPushButton:hover { background-color: rgba(100, 100, 100, 200); }
+        """
+        self.btn_y_in.setStyleSheet(btn_style)
+        self.btn_y_out.setStyleSheet(btn_style)
+        
+        self.btn_locate_cursor.clicked.connect(self.locate_cursor)
+        self.btn_y_in.clicked.connect(self.manual_y_zoom_in)
+        self.btn_y_out.clicked.connect(self.manual_y_zoom_out)
+        
+        btn_row.addWidget(self.btn_locate_cursor)
+        btn_row.addSpacing(10)
+        btn_row.addWidget(self.btn_y_in)
+        btn_row.addWidget(self.btn_y_out)
+        
+        overlay_layout.addLayout(btn_row)
+        overlay_layout.addStretch(1) # Pushes the row to the top
         
         # Mini map
         self.plot_mini = pg.PlotWidget()
@@ -96,8 +151,7 @@ class SlicerTab(BaseSignalTab):
         self.plot_mini.hideAxis('left')
         self.plot_mini.setBackground('#1e1e1e')
         self.curve_mini = self.plot_mini.plot(pen=pg.mkPen('w', width=1))
-        
-        self.nav_region = pg.LinearRegionItem()
+        self.nav_region = pg.LinearRegionItem(pen=pg.mkPen('w', width=4), hoverPen=pg.mkPen('y', width=8))
         self.nav_region.setZValue(10)
         self.plot_mini.addItem(self.nav_region)
         self.nav_region.sigRegionChanged.connect(self.update_zoom_from_nav)
@@ -132,9 +186,16 @@ class SlicerTab(BaseSignalTab):
         self.sidebar_layout.addLayout(row_sym)
         self.sidebar_layout.addSpacing(10)
         
+        autoscale_layout = QHBoxLayout()
         self.btn_autoscale = QPushButton("Auto Scale Y-Axis")
         self.btn_autoscale.clicked.connect(self.autoscale_view)
-        self.sidebar_layout.addWidget(self.btn_autoscale)
+        autoscale_layout.addWidget(self.btn_autoscale)
+        
+        self.chk_auto_autoscale = QCheckBox("Auto auto-scale")
+        self.chk_auto_autoscale.setChecked(True)
+        autoscale_layout.addWidget(self.chk_auto_autoscale)
+        
+        self.sidebar_layout.addLayout(autoscale_layout)
         self.sidebar_layout.addSpacing(20)
 
         # Visuals.
@@ -210,6 +271,16 @@ class SlicerTab(BaseSignalTab):
         self.lbl_auto_status = QLabel("Status: Manual Mode")
         self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
         self.auto_layout.addWidget(self.lbl_auto_status)
+
+        self.lbl_baud_metric = QLabel("")
+        self.lbl_baud_metric.setStyleSheet("color: #0277BD; font-size: 14pt; font-weight: bold;")
+        self.lbl_baud_metric.setVisible(False)
+        self.auto_layout.addWidget(self.lbl_baud_metric)
+
+        self.lbl_sps_metric = QLabel("")
+        self.lbl_sps_metric.setStyleSheet("color: #0277BD; font-size: 14pt; font-weight: bold;")
+        self.lbl_sps_metric.setVisible(False)
+        self.auto_layout.addWidget(self.lbl_sps_metric)
         
         self.sidebar_layout.addWidget(self.grp_auto)
         
@@ -270,7 +341,7 @@ class SlicerTab(BaseSignalTab):
         # Only reset zoom if significant change.
         if abs(current_range[1] - actual_duration) > 0.01:
              self.plot_mini.setXRange(0, actual_duration)
-             zoom_t = actual_duration * 0.005
+             zoom_t = actual_duration * 0.10
              
              self.nav_region.blockSignals(True)
              self.nav_region.setRegion([0, zoom_t])
@@ -311,6 +382,9 @@ class SlicerTab(BaseSignalTab):
         self.update_timer.start(50)
 
     def refresh_plot_data(self):
+        # Automatically adjust Y-Axis if enabled before drawing points
+        if getattr(self, 'chk_auto_autoscale', None) and self.chk_auto_autoscale.isChecked():
+            self.autoscale_view()
         self.update_main_plot()
         self.update_clock_ticks()
 
@@ -505,6 +579,17 @@ class SlicerTab(BaseSignalTab):
             total = len(centers)
             self.lbl_auto_status.setText(f"Status: PLL Mode (Total Sym: {total})")
             self.lbl_auto_status.setStyleSheet("color: #2E7D32; font-weight: bold;")
+
+            if total > 1:
+                diffs = np.diff(centers)
+                median_duration = float(np.median(diffs))
+                if median_duration > 0:
+                    baud = 1.0 / median_duration
+                    sps = median_duration * self.local_sr
+                    self.lbl_baud_metric.setText(f"Median Baud: {baud:.2f}")
+                    self.lbl_baud_metric.setVisible(True)
+                    self.lbl_sps_metric.setText(f"SPS: {sps:.2f}")
+                    self.lbl_sps_metric.setVisible(True)
             
             self.refresh_plot_data()
             self.extract_symbols()
@@ -525,6 +610,11 @@ class SlicerTab(BaseSignalTab):
         
         self.lbl_auto_status.setText("Status: Manual Mode")
         self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
+        
+        self.lbl_baud_metric.setText("")
+        self.lbl_baud_metric.setVisible(False)
+        self.lbl_sps_metric.setText("")
+        self.lbl_sps_metric.setVisible(False)
         
         self.check_auto_enable()
         self.refresh_plot_data()
@@ -549,6 +639,41 @@ class SlicerTab(BaseSignalTab):
         else: margin = (y_max - y_min) * 0.20 
         
         self.plot_main.setYRange(y_min - margin, y_max + margin)
+
+    def locate_cursor(self):
+        # Calculate viewport bounds
+        view_range = self.plot_main.viewRange()[0]
+        min_x, max_x = view_range[0], view_range[1]
+        view_width = max_x - min_x
+        
+        # Calculate new region bounds (20% of width, centered)
+        box_width = view_width * 0.20
+        center_x = min_x + (view_width / 2.0)
+        
+        # Move the box safely
+        self.clock_region.blockSignals(True)
+        self.clock_region.setRegion([center_x - (box_width / 2.0), center_x + (box_width / 2.0)])
+        self.clock_region.blockSignals(False)
+        
+        # Trigger symbol extraction explicitly since we blocked signals
+        self.update_clock_ticks()
+        self.extract_symbols()
+
+    def manual_y_zoom_in(self):
+        self.chk_auto_autoscale.setChecked(False)
+        y_min, y_max = self.plot_main.viewRange()[1]
+        
+        span = y_max - y_min
+        delta = span * 0.15
+        self.plot_main.setYRange(y_min + (delta / 2.0), y_max - (delta / 2.0), padding=0)
+
+    def manual_y_zoom_out(self):
+        self.chk_auto_autoscale.setChecked(False)
+        y_min, y_max = self.plot_main.viewRange()[1]
+        
+        span = y_max - y_min
+        delta = span * 0.15
+        self.plot_main.setYRange(y_min - (delta / 2.0), y_max + (delta / 2.0), padding=0)
 
     def check_auto_enable(self):
         # Only check if we aren't currently auto-synced
@@ -625,9 +750,4 @@ class SlicerTab(BaseSignalTab):
 
     def update_zoom_from_nav(self):
         min_x, max_x = self.nav_region.getRegion()
-        # Modifying XRange here triggers on_range_changed internally
         self.plot_main.setXRange(min_x, max_x, padding=0)
-
-    def update_nav_from_zoom(self, _, viewRange):
-        # We don't need to do anything here anymore, on_range_changed handles it
-        pass

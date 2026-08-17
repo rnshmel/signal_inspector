@@ -150,8 +150,8 @@ class SpectrogramTab(BaseSignalTab):
         self.region = pg.LinearRegionItem()
         self.region.setZValue(10)
         for line in self.region.lines:
-            line.setPen(pg.mkPen(color='w', width=3))
-            line.setHoverPen(pg.mkPen(color='r', width=5))
+            line.setPen(pg.mkPen(color='w', width=4))
+            line.setHoverPen(pg.mkPen(color='r', width=8))
         self.plot_mini.addItem(self.region)
         self.region.sigRegionChanged.connect(self.update_zoom_from_region)
         self.plot_spec.sigRangeChanged.connect(self.update_region_from_zoom)
