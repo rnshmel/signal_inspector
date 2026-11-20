@@ -1,6 +1,6 @@
 import sys
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
 import pyqtgraph as pg
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 
 # Import core context
 from core.context import SignalContext
@@ -46,4 +46,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

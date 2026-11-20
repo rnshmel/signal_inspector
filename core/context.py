@@ -1,5 +1,3 @@
-import numpy as np
-
 # Tracks the signal as it moves through the processing pipeline.
 class SignalContext:
 

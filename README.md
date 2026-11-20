@@ -1,8 +1,8 @@
 # Signal Inspector
 
-**Version:** 1.5.2
+**Version:** 2.0.0
  
-A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt5, NumPy, and SciPy.
+A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt6, PyQtGraph, NumPy, and SciPy.
 
 Note: currently supports
 - 2/4/8 Level FSK
@@ -18,24 +18,36 @@ Note: currently supports
 
 ## Quick Start
 
-This tool includes a launcher to handle Python virtual environments and dependencies automatically.
+This repository separates environment provisioning (`setup.sh`) from application execution (`run.sh`).
 
 ### Prerequisites
-- Python 3.8+
-- Linux / macOS / Windows (Ubuntu recommended)
+- Python 3.10+
+- Linux / macOS / Windows (Ubuntu / Xubuntu 22.04+ recommended)
+- On Debian/Ubuntu/Xubuntu Linux systems, `python3-venv` and Qt6 XCB/OpenGL runtime libraries (such as `libxcb-cursor0`) are required. `./setup.sh` checks for missing system packages and prints the exact `apt install` command if needed.
 
-### Running the Tool
+### Setup and Running the Tool
 1. **Clone the repository:**
    ```bash
    git clone https://www.github.com/rnshmel/signal_inspector.git
-   cd signal-inspector
+   cd signal_inspector
    ```
 
-2. **Launch:**
+2. **Set up the environment:**
+   ```bash
+   ./setup.sh -e
+   ```
+   *`setup.sh` verifies Python 3.10+ and Qt6 system dependencies, creates `.venv`, and installs packages from `requirements.txt`.*
+
+   Common `setup.sh` options:
+   - `-e`, `--examples`: Create `example_signals/` and generate sample `.cf32` IQ recordings (2-FSK, OOK, BPSK, 4-FSK).
+   - `-c`, `--clean`: Remove any existing `.venv` and `example_signals/` before doing a clean install.
+   - `-h`, `--help`: Show usage and all available options.
+
+3. **Launch:**
    ```bash
    ./run.sh basic_signal_inspector
    ```
-   *The script will automatically create a `.venv`, install dependencies from `requirements.txt`, and launch the application.*
+   *`run.sh` activates `.venv`, sets `PYTHONPATH`, and launches the requested script from `apps/` (the `.py` extension is optional). Run `./run.sh --help` to list available apps.*
 
 ---
 
@@ -45,9 +57,9 @@ This tool includes a launcher to handle Python virtual environments and dependen
 The Inspector operates as a linear pipeline. Data does not automatically flow between tabs. You must explicitly **Stage** output from one tab and **Load** it into the next.
 
 ### 1. Spectrogram View (Source)
-The entry point for raw data. Only complex floating-point 32-bit data is supported.
-- **Controls:** Open IQ recordings pan across a waterfall.
-- **Mosaic View:** If zoomed out on massive files, you can enable a "Mosaic" stride to visualize the entire file duration wthout taxing RAM.
+The entry point for raw IQ data. Supports `cf32` (Complex Float 32), `cs16` (Complex Int 16), `cs8` (Complex Int 8), and `cu8` (Complex Unsigned 8) recordings.
+- **Controls:** Open IQ recordings and pan/zoom across a debounced waterfall with a full-duration minimap.
+- **Mosaic View:** If zoomed out on massive files beyond the configured RAM limit, you can enable a "Mosaic" stride to visualize the entire file duration without taxing RAM.
 
 ### 2. Tuner and Filter (Extraction)
 Isolates a specific signal of interest from the wideband recording.
@@ -61,9 +73,11 @@ Isolates a specific signal of interest from the wideband recording.
 Converts complex IQ samples into real-valued analog signals.
 - **Input:** Filtered Baseband IQ (from Tab 2).
 - **Modes:**
-  - **Amplitude:** Magnitude detection (ASK).
-  - **Frequency:** Phase differencing (FSK).
-- **Slicer Preview:** Overlay threshold lines on the analog waveform to visualize how bits will be decided.
+  - **Amplitude (ASK):** Magnitude detection.
+  - **Frequency (FSK):** Phase differencing.
+  - **Phase (PSK):** Delayed-conjugate differential phase detection.
+- **Matched Filtering (Optional):** Apply Moving Average, Gaussian, or Root-Raised Cosine (RRC) filtering sized interactively with the on-plot box.
+- **Slicer Preview:** Overlay threshold lines on the analog waveform to visualize how discrete symbol levels will be decided.
 
 ### 4. Symbol Timing Recovery (Digital)
 Converts analog signals into discrete symbols (0, 1, 2, 3, etc) via user-aided symbol recovery.
@@ -75,10 +89,11 @@ Converts analog signals into discrete symbols (0, 1, 2, 3, etc) via user-aided s
 Basic reverse engineering.
 - **Input:** Symbol Stream (from Tab 4).
 - **Decoding Pipeline:**
-  1. **Line Logic:** Invert symbols (Active Low) or apply Differential Decoding (NRZ-I / Modulo subtraction).
-  2. **Symbol Mapping:** Map discrete integers (0, 1, 2, 3) to bit patterns (e.g., `3 -> 10`, `0 -> 00`).
-  3. **Line Coding:** Decode Manchester (IEEE or Thomas).
-- **Analysis:** View bits as binary stream or Hex dump. Highlight hex bytes to see corresponding bits. Search for preambles and sync words.
+  1. **Symbol Polarity:** Optionally invert discrete symbol levels (`(M-1) - s`).
+  2. **Symbol Mapping:** Configure $M$-level **Absolute** or **Differential** mappings (with Binary/Gray presets) to turn symbols into bit patterns (e.g., `3 -> 10`, `0 -> 00`).
+  3. **Bit String Actions:** Invert bits (`0 <-> 1`) or decode Manchester line coding (IEEE or Thomas).
+- **Analysis:** View bits in an editable workbench with alternating byte highlighting, live bit/byte/cursor metrics, and a synchronized Hex/ASCII viewer supporting `MSB First` / `LSB First` byte bit order. Search for hex or binary preambles/sync words with live match counting and wrap indicators, and align streams to a match.
+- **Export:** Save packed raw bytes (`.BIN`), ASCII bit strings (`.TXT`), or raw `uint8` discrete symbols (`.BIN`).
 
 ---
 
@@ -128,11 +143,10 @@ To add a new module (e.g., "OFDM Demodulator"):
 All heavy mathematical lifting resides in `utils/dsp_lib.py`. This ensures consistency across tabs and allows for easier unit testing.
 
 ### Deployment
-Use `run.sh` for all execution. It handles:
-1.  Locating the project root (independent of CWD).
-2.  Creating/Activating the `.venv`.
-3.  Installing pinned dependencies from `requirements.txt`.
-4.  Setting `PYTHONPATH` so the `apps/` directory can import `core/`.
+Environment setup and execution are split across two scripts:
+
+- **`./setup.sh`**: Handles initial provisioning. It locates the project root, checks for Python 3.10+ and required Linux Qt6 system libraries, creates `.venv`, installs dependencies from `requirements.txt`, and optionally generates `example_signals/` (`-e`).
+- **`./run.sh`**: Handles execution. It verifies `.venv` exists, activates it, sets `PYTHONPATH` so `apps/` can import `core/` and `utils/`, and launches the specified app in `apps/`.
 
 To create a new application configuration, place it in `apps/` and run `./run.sh my_new_app.py`.
 

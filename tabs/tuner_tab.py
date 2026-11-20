@@ -1,14 +1,30 @@
 import numpy as np
-import pyqtgraph as pg
-from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
+from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QWidget, QSplitter, QCheckBox,
-                             QGroupBox, QRadioButton, QFileDialog, QMessageBox, QScrollArea)
-from PyQt5.QtCore import Qt
+                             QGroupBox, QRadioButton, QFileDialog, QMessageBox,
+                             QScrollArea, QSizePolicy)
+from PyQt6.QtCore import Qt
+import pyqtgraph as pg
 
 # Import the base class.
 from core.base_tab import BaseSignalTab
 # Import dsp utilities.
 import utils.dsp_lib as dsp
+
+# Horizontal split between Left (Visualization) and Right (Sidebar Controls)
+# Setting SIDEBAR_PANEL_STRETCH = 0 lets the sidebar sit at natural sizeHint width
+VIZ_PANEL_STRETCH = 1
+SIDEBAR_PANEL_STRETCH = 0
+
+# Vertical split inside Visualization panel: Top (Tune Selection) vs. Bottom (Filtered Result)
+TOP_PLOT_STRETCH = 3
+BOTTOM_PLOT_STRETCH = 2
+
+# Selection overlay line widths (dashed bounds vs. solid center frequency line)
+REGION_LINE_WIDTH = 4
+REGION_HOVER_WIDTH = 6
+CENTER_LINE_WIDTH = 2
+CENTER_HOVER_WIDTH = 4
 
 class TunerTab(BaseSignalTab):
     def __init__(self, context):
@@ -32,9 +48,9 @@ class TunerTab(BaseSignalTab):
         self.layout.addLayout(main_h_layout)
 
         # Visualization (Internal Vertical Splitter)
-        self.viz_layout = QVBoxLayout()
-        self.splitter = QSplitter(Qt.Vertical)
-        self.viz_layout.addWidget(self.splitter)
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.splitter.setChildrenCollapsible(False)
 
         # Top Plot (Input)
         self.top_widget = QWidget()
@@ -42,15 +58,17 @@ class TunerTab(BaseSignalTab):
         self.top_layout.setContentsMargins(0, 0, 0, 0)
         
         self.lbl_info = QLabel("1. Tune Selection")
+        self.lbl_info.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.lbl_info.setStyleSheet("font-weight: bold; color: #444;")
         self.top_layout.addWidget(self.lbl_info)
 
         self.plot_input = pg.PlotWidget()
+        self.plot_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.plot_input.setLabel('left', 'Frequency', units='Hz')
         self.plot_input.setLabel('bottom', 'Time', units='s')
         self.img_input = pg.ImageItem()
         self.plot_input.addItem(self.img_input)
-        self.top_layout.addWidget(self.plot_input)
+        self.top_layout.addWidget(self.plot_input, stretch=1)
 
         # Interactive items
         self.region_time = pg.LinearRegionItem(orientation='vertical')
@@ -67,6 +85,7 @@ class TunerTab(BaseSignalTab):
         
         self.freq_center_line.sigPositionChanged.connect(self.on_center_line_drag)
         self.region_freq.sigRegionChanged.connect(self.on_region_drag)
+        self.region_freq.sigRegionChangeFinished.connect(self.on_region_drag)
         
         self.splitter.addWidget(self.top_widget)
 
@@ -76,32 +95,33 @@ class TunerTab(BaseSignalTab):
         self.bottom_layout.setContentsMargins(0, 0, 0, 0)
         
         self.lbl_result = QLabel("2. Filtered Result (Shifted to DC)")
+        self.lbl_result.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.lbl_result.setStyleSheet("font-weight: bold; color: #444;")
         self.bottom_layout.addWidget(self.lbl_result)
         
         self.plot_result = pg.PlotWidget()
+        self.plot_result.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.plot_result.setLabel('left', 'Frequency', units='Hz')
         self.plot_result.setLabel('bottom', 'Time', units='s')
         self.img_result = pg.ImageItem()
         self.plot_result.addItem(self.img_result)
-        self.bottom_layout.addWidget(self.plot_result)
+        self.bottom_layout.addWidget(self.plot_result, stretch=1)
         
         self.splitter.addWidget(self.bottom_widget)
-        self.splitter.setSizes([600, 400])
+        self.splitter.setStretchFactor(0, TOP_PLOT_STRETCH)
+        self.splitter.setStretchFactor(1, BOTTOM_PLOT_STRETCH)
 
         # Sidebar Controls
         self.sidebar = QGroupBox("Tuner Controls")
-        self.sidebar.setMinimumWidth(250)
+        self.sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
         # Processing Controls
         self.btn_apply = QPushButton("Apply Filter & Mix (⬇)")
-        self.btn_apply.setMinimumHeight(40)
-        self.btn_apply.setStyleSheet("font-weight: bold; background-color: #e1f5fe;")
+        self.btn_apply.setStyleSheet("font-weight: bold; background-color: #e1f5fe; padding: 8px 15px;")
         self.btn_apply.clicked.connect(self.run_filter)
         self.sidebar_layout.addWidget(self.btn_apply)
-        self.sidebar_layout.addSpacing(15)
         
         self.sidebar_layout.addWidget(QLabel("Selection Color:"))
         self.cb_color = QComboBox()
@@ -118,8 +138,6 @@ class TunerTab(BaseSignalTab):
         self.chk_show_freq.setChecked(True)
         self.chk_show_freq.stateChanged.connect(self.toggle_visibility)
         self.sidebar_layout.addWidget(self.chk_show_freq)
-        
-        self.sidebar_layout.addSpacing(20)
 
         # Export Controls
         self.grp_export = QGroupBox("File Export")
@@ -142,13 +160,23 @@ class TunerTab(BaseSignalTab):
         self.sidebar_layout.addWidget(self.grp_export)
         self.sidebar_layout.addStretch()
 
-        # Add Layout Components
-        main_h_layout.addLayout(self.viz_layout, stretch=5)
-        
+        # Sidebar inside scroll area
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         scroll_area.setWidget(self.sidebar)
-        main_h_layout.addWidget(scroll_area, stretch=1)
+
+        # Combine visualization and sidebar in a user-resizable horizontal splitter
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(self.splitter)
+        self.main_splitter.addWidget(scroll_area)
+        self.main_splitter.setStretchFactor(0, VIZ_PANEL_STRETCH)
+        self.main_splitter.setStretchFactor(1, SIDEBAR_PANEL_STRETCH)
+        main_h_layout.addWidget(self.main_splitter)
 
         self.update_colors('Green')
 
@@ -319,53 +347,68 @@ class TunerTab(BaseSignalTab):
         self.region_freq.blockSignals(False)
 
     def on_region_drag(self):
-        # Symmetrical resizing logic:
+        min_f, max_f = self.region_freq.getRegion()
+
+        if self.last_freq_bounds is None:
+            self.last_freq_bounds = (min_f, max_f)
+
+        last_min, last_max = self.last_freq_bounds
+        d_min = min_f - last_min
+        d_max = max_f - last_max
+
+        if abs(d_min) < 1e-12 and abs(d_max) < 1e-12:
+            return
+
         self.freq_center_line.blockSignals(True)
         self.region_freq.blockSignals(True)
+        try:
+            # Dragging the highlighted region body moves both edges by the same delta
+            is_body_drag = bool(getattr(self.region_freq, 'moving', False)) or (
+                abs(d_min) > 1e-12
+                and abs(d_max) > 1e-12
+                and abs(d_min - d_max) <= max(1e-9, 1e-5 * max(abs(d_min), abs(d_max)))
+            )
 
-        center = self.freq_center_line.value()
-        min_f, max_f = self.region_freq.getRegion()
-        
-        if self.last_freq_bounds is None: 
-            self.last_freq_bounds = (min_f, max_f)
-            
-        last_min, last_max = self.last_freq_bounds
-        
-        # Determine which edge moved (top or bottom).
-        if abs(max_f - last_max) > abs(min_f - last_min): 
-            # Top edge moved.
-            new_radius = abs(max_f - center)
-        else: 
-            # Bottom edge moved (or both moved equal/neither, default to min).
-            new_radius = abs(min_f - center)
-            
-        new_min = center - new_radius
-        new_max = center + new_radius
-        
-        # Apply symmetrical bounds.
-        self.region_freq.setRegion([new_min, new_max])
-        self.last_freq_bounds = (new_min, new_max)
-        
-        self.freq_center_line.blockSignals(False)
-        self.region_freq.blockSignals(False)
+            if is_body_drag:
+                self.freq_center_line.setValue((min_f + max_f) / 2.0)
+                self.last_freq_bounds = (min_f, max_f)
+            else:
+                # Single dashed edge dragged: keep center fixed and resize bandwidth symmetrically.
+                center = self.freq_center_line.value()
+                tol = max(1e-9, 1e-5 * max(abs(last_min), abs(last_max), 1.0))
+
+                # Handle fast drags across the opposite edge where LinearRegionItem swapMode='sort' swaps lines.
+                if abs(min_f - last_max) <= tol and abs(max_f - last_max) > tol:
+                    moved_edge = max_f
+                elif abs(max_f - last_min) <= tol and abs(min_f - last_min) > tol:
+                    moved_edge = min_f
+                elif abs(d_max) > abs(d_min):
+                    moved_edge = max_f
+                else:
+                    moved_edge = min_f
+
+                new_radius = abs(moved_edge - center)
+                new_min = center - new_radius
+                new_max = center + new_radius
+                self.region_freq.setRegion([new_min, new_max])
+                self.last_freq_bounds = (new_min, new_max)
+        finally:
+            self.freq_center_line.blockSignals(False)
+            self.region_freq.blockSignals(False)
 
     def update_colors(self, color_name):
         c_map = {'Green':'#00FF00', 'Red':'#FF0000', 'Cyan':'#00FFFF', 'Yellow':'#FFFF00', 'White':'#FFFFFF'}
         c = c_map.get(color_name, '#00FF00')
         brush_color = pg.mkColor(c); brush_color.setAlpha(50) 
         
-        for line in self.region_time.lines:
-            line.setPen(pg.mkPen(color=c, width=2, style=Qt.DashLine))
-            line.setHoverPen(pg.mkPen(color=c, width=4))
-        self.region_time.setBrush(brush_color)
+        for region in (self.region_time, self.region_freq):
+            for line in region.lines:
+                line.setPen(pg.mkPen(color=c, width=REGION_LINE_WIDTH, style=Qt.PenStyle.DashLine))
+                line.setHoverPen(pg.mkPen(color=c, width=REGION_HOVER_WIDTH))
+            region.setBrush(brush_color)
         
-        for line in self.region_freq.lines:
-            line.setPen(pg.mkPen(color=c, width=2, style=Qt.DashLine))
-            line.setHoverPen(pg.mkPen(color=c, width=4))
-        self.region_freq.setBrush(brush_color)
-        
-        self.freq_center_line.setPen(pg.mkPen(color=c, width=2))
-        self.freq_center_line.setHoverPen(pg.mkPen(color=c, width=4))
+        self.freq_center_line.setPen(pg.mkPen(color=c, width=CENTER_LINE_WIDTH))
+        self.freq_center_line.setHoverPen(pg.mkPen(color=c, width=CENTER_HOVER_WIDTH))
 
     def toggle_visibility(self):
         self.region_time.setVisible(self.chk_show_time.isChecked())

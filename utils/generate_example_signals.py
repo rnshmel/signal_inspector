@@ -216,14 +216,14 @@ def add_padding_and_noise(iq_data):
     """
     Pads the IQ signal with its own length of zeros on either end and adds AWGN.
     """
-    logging.info("Applying Padding and Noise)")
+    logging.info("Applying Padding and Noise")
     sig_len = len(iq_data)
     padding = np.zeros(sig_len, dtype=np.complex64)
 
     final_iq = np.concatenate((padding, iq_data, padding))
 
-    noise_i = np.random.normal(0, 0.05, len(final_iq))
-    noise_q = np.random.normal(0, 0.05, len(final_iq))
+    noise_i = np.random.normal(0, 0.03, len(final_iq))
+    noise_q = np.random.normal(0, 0.03, len(final_iq))
     noise = (noise_i + 1j * noise_q).astype(np.complex64)
 
     final_iq += noise
