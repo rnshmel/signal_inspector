@@ -1,15 +1,40 @@
 import os
 import numpy as np
-import pyqtgraph as pg
-from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
+from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QLineEdit, QPushButton, QFileDialog, QGroupBox, 
-                             QGridLayout, QCheckBox, QSpinBox, QScrollArea)
-from PyQt5.QtCore import Qt
+                             QGridLayout, QCheckBox, QSpinBox, QScrollArea,
+                             QSizePolicy, QWidget, QSplitter)
+from PyQt6.QtCore import Qt, QTimer
+import pyqtgraph as pg
 
 # Import the base class from core.
 from core.base_tab import BaseSignalTab
 # Import dsp utilities.
 import utils.dsp_lib as dsp
+
+# Horizontal split between Left (Visualization) and Right (Sidebar Controls)
+# Setting SIDEBAR_PANEL_STRETCH = 0 lets the sidebar sit at natural sizeHint width
+VIZ_PANEL_STRETCH = 1
+SIDEBAR_PANEL_STRETCH = 0
+
+# Vertical split inside Visualization panel: Main Spectrogram vs. Minimap
+SPEC_PLOT_STRETCH = 8
+MINI_PLOT_STRETCH = 1
+
+# File Configuration Grid: Column stretch ratios [Label, Path Input, Browse Button]
+FILE_GRID_LABEL_STRETCH = 0
+FILE_GRID_PATH_STRETCH = 1
+FILE_GRID_BTN_STRETCH = 0
+
+# Sidebar internal vertical stretch (Histogram LUT widget vs bottom spacer)
+HIST_WIDGET_STRETCH = 2
+SIDEBAR_BOTTOM_STRETCH = 1
+
+# Debounce delay (ms) before recomputing spectrogram after pan/zoom
+DEBOUNCE_MS = 250
+
+# Extra time buffer ratio rendered on either side of the visible spectrogram window
+VIEW_BUFFER_RATIO = 0.00
 
 class SpectrogramTab(BaseSignalTab):
     def __init__(self, context):
@@ -24,6 +49,11 @@ class SpectrogramTab(BaseSignalTab):
         self.local_iq_handle = None
         self.local_duration = 0
         self.current_file_path = "" 
+
+        # Timer for debouncing heavy spectrogram FFT updates
+        self.update_timer = QTimer()
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self.refresh_spectrogram)
         
         self.init_ui()
 
@@ -33,7 +63,7 @@ class SpectrogramTab(BaseSignalTab):
 
         # Sidebar controls.
         self.sidebar = QGroupBox("Controls")
-        self.sidebar.setMinimumWidth(250)
+        self.sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
@@ -45,14 +75,18 @@ class SpectrogramTab(BaseSignalTab):
         self.txt_path = QLineEdit()
         self.txt_path.setReadOnly(True)
         self.txt_path.setPlaceholderText("Select File...")
+        self.txt_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         btn_browse = QPushButton("...")
-        btn_browse.setFixedWidth(30)
+        btn_browse.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         btn_browse.clicked.connect(self.browse_file)
         
         layout_file.addWidget(QLabel("File:"), 0, 0)
         layout_file.addWidget(self.txt_path, 0, 1)
         layout_file.addWidget(btn_browse, 0, 2)
+        layout_file.setColumnStretch(0, FILE_GRID_LABEL_STRETCH)
+        layout_file.setColumnStretch(1, FILE_GRID_PATH_STRETCH)
+        layout_file.setColumnStretch(2, FILE_GRID_BTN_STRETCH)
         
         self.cb_dtype = QComboBox()
         self.cb_dtype.addItems(["cf32 (Complex Float 32)", 
@@ -71,7 +105,6 @@ class SpectrogramTab(BaseSignalTab):
         layout_file.addWidget(self.btn_load_local, 3, 0, 1, 3)
 
         self.sidebar_layout.addWidget(grp_file)
-        self.sidebar_layout.addSpacing(10)
 
         # Memory Settings
         grp_mem = QGroupBox("Memory / View Control")
@@ -81,16 +114,16 @@ class SpectrogramTab(BaseSignalTab):
         row_ram = QHBoxLayout()
         row_ram.addWidget(QLabel("Max RAM (MB):"))
         self.spin_ram_limit = QSpinBox()
-        self.spin_ram_limit.setRange(100, 2000)
-        self.spin_ram_limit.setValue(500)
-        self.spin_ram_limit.setSingleStep(100)
+        self.spin_ram_limit.setRange(50, 2000)
+        self.spin_ram_limit.setValue(350)
+        self.spin_ram_limit.setSingleStep(50)
         self.spin_ram_limit.setToolTip("Limits the amount of data loaded into RAM for the spectrogram.")
-        self.spin_ram_limit.valueChanged.connect(self.refresh_spectrogram)
+        self.spin_ram_limit.valueChanged.connect(self.schedule_refresh)
         row_ram.addWidget(self.spin_ram_limit)
         layout_mem.addLayout(row_ram)
 
-        self.chk_sparse = QCheckBox("Enable Mosaic View")
-        self.chk_sparse.setToolTip("If view exceeds RAM limit, load sparse chunks (Mosaic) instead of clamping.")
+        self.chk_sparse = QCheckBox("Enable Strided View")
+        self.chk_sparse.setToolTip("If view exceeds RAM limit, load sparse chunks instead of clamping.")
         self.chk_sparse.setChecked(False)
         self.chk_sparse.stateChanged.connect(self.refresh_spectrogram)
         layout_mem.addWidget(self.chk_sparse)
@@ -99,7 +132,6 @@ class SpectrogramTab(BaseSignalTab):
         
         self.lbl_file_info = QLabel("No File Loaded")
         self.sidebar_layout.addWidget(self.lbl_file_info)
-        self.sidebar_layout.addSpacing(10)
 
         # Spectrogram Config
         self.sidebar_layout.addWidget(QLabel("FFT Size:"))
@@ -125,15 +157,19 @@ class SpectrogramTab(BaseSignalTab):
 
         self.sidebar_layout.addWidget(QLabel("Levels:"))
         self.hist_widget = pg.HistogramLUTWidget()
-        self.hist_widget.setMinimumHeight(150)
-        self.hist_widget.setLevels(-120, 0)
-        self.sidebar_layout.addWidget(self.hist_widget)
-        self.sidebar_layout.addStretch()
+        self.hist_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
+        self.hist_widget.setLevels(-130, -30)
+        self.hist_widget.setHistogramRange(-130, -30)
+        self.sidebar_layout.addWidget(self.hist_widget, stretch=HIST_WIDGET_STRETCH)
+        self.sidebar_layout.addStretch(SIDEBAR_BOTTOM_STRETCH)
 
         # Visualization area.
-        self.viz_layout = QVBoxLayout()
+        viz_container = QWidget()
+        self.viz_layout = QVBoxLayout(viz_container)
+        self.viz_layout.setContentsMargins(0, 0, 0, 0)
         
         self.plot_spec = pg.PlotWidget()
+        self.plot_spec.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.plot_spec.setLabel('left', 'Frequency', units='Hz')
         self.plot_spec.setLabel('bottom', 'Time', units='s')
         self.img_spec = pg.ImageItem()
@@ -143,7 +179,7 @@ class SpectrogramTab(BaseSignalTab):
         self.update_colormap('inferno')
 
         self.plot_mini = pg.PlotWidget()
-        self.plot_mini.setFixedHeight(80)
+        self.plot_mini.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.plot_mini.hideAxis('bottom')
         self.curve_mini = self.plot_mini.plot(pen='w')
         
@@ -156,17 +192,26 @@ class SpectrogramTab(BaseSignalTab):
         self.region.sigRegionChanged.connect(self.update_zoom_from_region)
         self.plot_spec.sigRangeChanged.connect(self.update_region_from_zoom)
 
-        self.viz_layout.addWidget(self.plot_spec)
-        self.viz_layout.addWidget(self.plot_mini)
-
-        # Apply visualization to left side
-        main_h_layout.addLayout(self.viz_layout, stretch=5)
+        self.viz_layout.addWidget(self.plot_spec, stretch=SPEC_PLOT_STRETCH)
+        self.viz_layout.addWidget(self.plot_mini, stretch=MINI_PLOT_STRETCH)
         
         # Apply sidebar inside scroll area to right side
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         scroll_area.setWidget(self.sidebar)
-        main_h_layout.addWidget(scroll_area, stretch=1)
+
+        # Combine visualization and sidebar in a user-resizable horizontal splitter
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(viz_container)
+        self.main_splitter.addWidget(scroll_area)
+        self.main_splitter.setStretchFactor(0, VIZ_PANEL_STRETCH)
+        self.main_splitter.setStretchFactor(1, SIDEBAR_PANEL_STRETCH)
+        main_h_layout.addWidget(self.main_splitter)
 
     def browse_file(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Open IQ", "", "All Files (*)")
@@ -236,6 +281,11 @@ class SpectrogramTab(BaseSignalTab):
         if self.local_iq_handle is None: return
         min_t, max_t = self.region.getRegion()
         sr = float(self.txt_sr.text())
+
+        # Add a buffer on either side if wanted
+        pad_t = (max_t - min_t) * VIEW_BUFFER_RATIO
+        min_t = max(0.0, min_t - pad_t)
+        max_t = min(self.local_duration, max_t + pad_t)
         
         fft_size = int(self.cb_fft.currentText())
         overlap_factor = int(self.cb_overlap.currentText())
@@ -295,6 +345,8 @@ class SpectrogramTab(BaseSignalTab):
                 # Map to global time (min_t)
                 self.img_spec.setRect(pg.QtCore.QRectF(min_t, extent[2], extent[1], extent[3]-extent[2]))
 
+        self.update_timer.stop()
+
     def update_colormap(self, t):
         if t == 'White Hot':
             grad = pg.GradientEditorItem()
@@ -314,12 +366,15 @@ class SpectrogramTab(BaseSignalTab):
         else:
             self.hist_widget.gradient.loadPreset(t)
 
+    def schedule_refresh(self):
+        self.update_timer.start(DEBOUNCE_MS)
+
     def update_zoom_from_region(self):
         min_x, max_x = self.region.getRegion()
         self.plot_spec.setXRange(min_x, max_x, padding=0)
-        self.refresh_spectrogram()
 
     def update_region_from_zoom(self, _, viewRange):
         self.region.blockSignals(True)
         self.region.setRegion(viewRange[0])
         self.region.blockSignals(False)
+        self.update_timer.start(DEBOUNCE_MS)

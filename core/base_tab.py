@@ -1,6 +1,5 @@
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLabel, QFrame, QMessageBox)
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
+                             QLabel, QFrame, QMessageBox, QSizePolicy)
 
 class BaseSignalTab(QWidget):
     # Parent class for all signal inspector tabs.
@@ -17,7 +16,8 @@ class BaseSignalTab(QWidget):
 
         # The command bar standard header.
         self.header_frame = QFrame()
-        self.header_frame.setFrameShape(QFrame.StyledPanel)
+        self.header_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.header_frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.header_frame.setStyleSheet("background-color: #f0f0f0; border-radius: 4px;")
         self.header_layout = QHBoxLayout(self.header_frame)
         self.header_layout.setContentsMargins(10, 5, 10, 5)
@@ -89,9 +89,10 @@ class BaseSignalTab(QWidget):
 
         # The content area where child classes fill UI.
         self.content_widget = QWidget()
+        self.content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.layout = QVBoxLayout(self.content_widget)
         self.layout.setContentsMargins(0, 0, 0, 0)
-        self._main_layout.addWidget(self.content_widget)
+        self._main_layout.addWidget(self.content_widget, stretch=1)
 
     def _handle_load(self):
         # Wrapper to handle errors during loading.

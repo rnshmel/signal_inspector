@@ -79,11 +79,11 @@ if [ -d "$VENV_DIR" ]; then
     source "$VENV_DIR/bin/activate"
 else
     # Select Python interpreter
-    PREFERRED_VERSIONS=("python3.11" "python3.10" "python3.9" "python3.8" "python3")
+    PREFERRED_VERSIONS=("python3.13" "python3.12" "python3.11" "python3.10" "python3")
     PYTHON_CMD=""
 
     for ver in "${PREFERRED_VERSIONS[@]}"; do
-        if command -v "$ver" &> /dev/null; then
+        if command -v "$ver" &> /dev/null && "$ver" -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" &> /dev/null; then
             PYTHON_CMD="$ver"
             echo "--- Selected Python interpreter: $PYTHON_CMD ---"
             break
@@ -91,15 +91,46 @@ else
     done
 
     if [ -z "$PYTHON_CMD" ]; then
-        echo "Error: Could not find a valid Python 3 interpreter."
+        echo "Error: Could not find a valid Python 3.10+ interpreter."
         exit 1
     fi
 
-    echo "--- Checking if the 'venv' module is available ---"
-    if ! "$PYTHON_CMD" -c "import venv" &> /dev/null; then
-        echo "Error: The 'venv' module is not available for $PYTHON_CMD."
-        echo "On Debian/Ubuntu systems, you might need to install it manually:"
-        echo "  sudo apt install ${PYTHON_CMD}-venv"
+    echo "--- Checking system dependencies (venv and Qt6 libraries) ---"
+    MISSING_PKGS=()
+
+    if ! "$PYTHON_CMD" -c "import venv, ensurepip" &> /dev/null; then
+        MISSING_PKGS+=("${PYTHON_CMD}-venv")
+    fi
+
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        LDCONFIG_CMD="$(command -v ldconfig || command -v /sbin/ldconfig || command -v /usr/sbin/ldconfig || true)"
+        if [ -n "$LDCONFIG_CMD" ]; then
+            LD_CACHE="$("$LDCONFIG_CMD" -p 2>/dev/null)"
+            QT_SYS_LIBS=(
+                "libxcb-cursor.so.0:libxcb-cursor0"
+                "libxkbcommon-x11.so.0:libxkbcommon-x11-0"
+                "libxcb-icccm.so.4:libxcb-icccm4"
+                "libxcb-image.so.0:libxcb-image0"
+                "libxcb-keysyms.so.1:libxcb-keysyms1"
+                "libxcb-render-util.so.0:libxcb-render-util0"
+                "libxcb-xkb.so.1:libxcb-xkb1"
+                "libGL.so.1:libgl1"
+                "libEGL.so.1:libegl1"
+            )
+            for entry in "${QT_SYS_LIBS[@]}"; do
+                lib_name="${entry%%:*}"
+                pkg_name="${entry##*:}"
+                if ! grep -q "$lib_name" <<< "$LD_CACHE"; then
+                    MISSING_PKGS+=("$pkg_name")
+                fi
+            done
+        fi
+    fi
+
+    if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+        echo "Error: Missing required system dependencies: ${MISSING_PKGS[*]}"
+        echo "On Debian/Ubuntu/Xubuntu systems, install them manually:"
+        echo "  sudo apt install ${MISSING_PKGS[*]}"
         exit 1
     fi
 

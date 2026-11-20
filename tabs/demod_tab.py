@@ -1,14 +1,34 @@
 import numpy as np
-import pyqtgraph as pg
-from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
+from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QPushButton, QGroupBox, QCheckBox, QSlider, 
-                             QSpinBox, QScrollArea)
-from PyQt5.QtCore import Qt, QTimer
+                             QSpinBox, QScrollArea, QSizePolicy, QWidget,
+                             QSplitter)
+from PyQt6.QtCore import Qt, QTimer
+import pyqtgraph as pg
 
 # Import the base class.
 from core.base_tab import BaseSignalTab
 # Import dsp utilities.
 import utils.dsp_lib as dsp
+
+# Horizontal split between Left (Visualization) and Right (Sidebar Controls)
+# Setting SIDEBAR_PANEL_STRETCH = 0 lets the sidebar sit at natural sizeHint width
+VIZ_PANEL_STRETCH = 1
+SIDEBAR_PANEL_STRETCH = 0
+
+# Vertical split inside Visualization panel: Main Demod Plot vs. Minimap
+MAIN_PLOT_STRETCH = 8
+MINI_PLOT_STRETCH = 1
+
+# Debounce delay (ms) before slicing/updating plot after pan/zoom
+DEBOUNCE_MS = 100
+
+# Extra time buffer ratio rendered on either side of the visible plot window
+VIEW_BUFFER_RATIO = 0.25
+
+# Trace line widths
+ANALOG_PEN_WIDTH = 3
+DIGITAL_PEN_WIDTH = 5
 
 class DemodTab(BaseSignalTab):
     def __init__(self, context):
@@ -37,25 +57,31 @@ class DemodTab(BaseSignalTab):
         self.layout.addLayout(main_h_layout)
 
         # Visualization
-        self.viz_layout = QVBoxLayout()
+        viz_container = QWidget()
+        self.viz_layout = QVBoxLayout(viz_container)
+        self.viz_layout.setContentsMargins(0, 0, 0, 0)
         
         # Main plot setup.
         self.plot_main = pg.PlotWidget()
+        self.plot_main.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.plot_main.setLabel('bottom', 'Time', units='s')
         self.plot_main.showGrid(x=True, y=True, alpha=0.3)
         self.plot_main.setBackground('#1e1e1e')
+        self.apply_opaque_grid('#383838')
         self.plot_main.setMouseEnabled(x=True, y=False)
         
-        # Optimization
-        self.plot_main.setClipToView(True) 
-        self.plot_main.setDownsampling(auto=True, mode='peak')
-        
-        # Analog trace.
-        self.curve_main = self.plot_main.plot(pen=pg.mkPen('g', width=3))
+        # Analog trace (debounced downsampling in update_main_plot instead of per-frame clip/downsample).
+        self.curve_main = self.plot_main.plot(
+            pen=pg.mkPen('g', width=ANALOG_PEN_WIDTH),
+            dynamicRangeLimit=None
+        )
         
         # Digital overlay trace.
-        self.pen_digital = pg.mkPen('#FFA500', width=4)
-        self.curve_digital = self.plot_main.plot(pen=self.pen_digital)
+        self.pen_digital = pg.mkPen('#FFA500', width=DIGITAL_PEN_WIDTH)
+        self.curve_digital = self.plot_main.plot(
+            pen=self.pen_digital,
+            dynamicRangeLimit=None
+        )
         self.curve_digital.setVisible(False)
 
         overlay_layout = QVBoxLayout(self.plot_main)
@@ -66,20 +92,20 @@ class DemodTab(BaseSignalTab):
         
         self.btn_y_in = QPushButton("+")
         self.btn_y_out = QPushButton("-")
+        self.btn_y_in.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.btn_y_out.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         
         btn_style = """
             QPushButton {
-                background-color: rgba(60, 60, 60, 150);
+                background-color: #3c3c3c;
                 color: white;
                 font-weight: bold;
-                font-size: 18px;
+                font-size: 12pt;
+                border: 1px solid #555555;
                 border-radius: 4px;
-                min-width: 30px;
-                max-width: 30px;
-                min-height: 30px;
-                max-height: 30px;
+                padding: 2px 10px;
             }
-            QPushButton:hover { background-color: rgba(100, 100, 100, 200); }
+            QPushButton:hover { background-color: #5a5a5a; }
         """
         self.btn_y_in.setStyleSheet(btn_style)
         self.btn_y_out.setStyleSheet(btn_style)
@@ -100,11 +126,11 @@ class DemodTab(BaseSignalTab):
         self.filter_region.sigRegionChanged.connect(self.update_filter_label)
         self.plot_main.addItem(self.filter_region)
         
-        self.viz_layout.addWidget(self.plot_main)
+        self.viz_layout.addWidget(self.plot_main, stretch=MAIN_PLOT_STRETCH)
         
         # Mini map.
         self.plot_mini = pg.PlotWidget()
-        self.plot_mini.setFixedHeight(80)
+        self.plot_mini.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.plot_mini.hideAxis('bottom')
         self.plot_mini.hideAxis('left')
         self.plot_mini.setBackground('#1e1e1e')
@@ -117,26 +143,23 @@ class DemodTab(BaseSignalTab):
         self.region.sigRegionChanged.connect(self.update_zoom_from_region)
         self.plot_main.sigRangeChanged.connect(self.on_range_changed)
         
-        self.viz_layout.addWidget(self.plot_mini)
+        self.viz_layout.addWidget(self.plot_mini, stretch=MINI_PLOT_STRETCH)
 
         # Sidebar Controls
         self.sidebar = QGroupBox("Demodulation")
-        self.sidebar.setMinimumWidth(250)
+        self.sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
         self.btn_run = QPushButton("RUN DEMOD")
-        self.btn_run.setMinimumHeight(40)
-        self.btn_run.setStyleSheet("font-weight: bold; background-color: #e1f5fe;")
+        self.btn_run.setStyleSheet("font-weight: bold; background-color: #e1f5fe; padding: 8px 15px;")
         self.btn_run.clicked.connect(self.run_demod)
         self.sidebar_layout.addWidget(self.btn_run)
-        self.sidebar_layout.addSpacing(20)
         
         self.sidebar_layout.addWidget(QLabel("Mode:"))
         self.cb_mode = QComboBox()
         self.cb_mode.addItems(["Amplitude (ASK)", "Frequency (FSK)", "Phase (PSK)"])
         self.sidebar_layout.addWidget(self.cb_mode)
-        self.sidebar_layout.addSpacing(10)
         
         autoscale_layout = QHBoxLayout()
         self.btn_autoscale = QPushButton("Auto Scale Y-Axis")
@@ -148,7 +171,6 @@ class DemodTab(BaseSignalTab):
         autoscale_layout.addWidget(self.chk_auto_autoscale)
         
         self.sidebar_layout.addLayout(autoscale_layout)
-        self.sidebar_layout.addSpacing(20)
 
         self.grp_filter = QGroupBox("Matched Filtering (Optional)")
         self.filter_layout = QVBoxLayout()
@@ -170,7 +192,6 @@ class DemodTab(BaseSignalTab):
         self.filter_layout.addWidget(self.btn_apply_filter)
         
         self.sidebar_layout.addWidget(self.grp_filter)
-        self.sidebar_layout.addSpacing(10)
 
         # View Settings.
         self.grp_view = QGroupBox("View Settings")
@@ -178,7 +199,7 @@ class DemodTab(BaseSignalTab):
         self.grp_view.setLayout(self.view_layout)
 
         self.lbl_active_points = QLabel("Visible Points: --")
-        self.lbl_active_points.setStyleSheet("font-size: 11px; color: #888; font-weight: bold;")
+        self.lbl_active_points.setStyleSheet("font-size: 9pt; color: #888; font-weight: bold;")
         self.view_layout.addWidget(self.lbl_active_points)
         
         self.chk_light_mode = QCheckBox("Light Mode")
@@ -198,7 +219,6 @@ class DemodTab(BaseSignalTab):
         self.view_layout.addLayout(row_thresh)
         
         self.sidebar_layout.addWidget(self.grp_view)
-        self.sidebar_layout.addSpacing(10)
         
         # Slicer Controls (Thresholds).
         self.grp_slicer = QGroupBox("Slicer (Thresholds)")
@@ -215,41 +235,48 @@ class DemodTab(BaseSignalTab):
         self.cb_levels.currentTextChanged.connect(self.setup_thresholds)
         self.slicer_layout.addWidget(self.cb_levels)
         
-        self.slicer_layout.addSpacing(10)
         self.slicer_layout.addWidget(QLabel("Trace Color:"))
         self.cb_color = QComboBox()
         self.cb_color.addItems(['Orange', 'Lime', 'Cyan', 'Magenta', 'Yellow', 'White/Black', 'Blue'])
         self.cb_color.currentTextChanged.connect(self.update_digital_color)
         self.slicer_layout.addWidget(self.cb_color)
         
-        self.slicer_layout.addSpacing(10)
         self.lbl_opacity = QLabel("Overlay Opacity: 100%")
         self.slicer_layout.addWidget(self.lbl_opacity)
         
-        self.slider_opacity = QSlider(Qt.Horizontal)
+        self.slider_opacity = QSlider(Qt.Orientation.Horizontal)
         self.slider_opacity.setRange(0, 100)
         self.slider_opacity.setValue(100)
-        self.slider_opacity.setTickPosition(QSlider.TicksBelow)
+        self.slider_opacity.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.slider_opacity.setTickInterval(25)
         self.slider_opacity.valueChanged.connect(self.update_opacity)
         self.slicer_layout.addWidget(self.slider_opacity)
 
-        self.slicer_layout.addSpacing(10)
         self.lbl_thresh_info = QLabel("Values: None")
-        self.lbl_thresh_info.setStyleSheet("font-size: 10px; color: #666;")
+        self.lbl_thresh_info.setStyleSheet("font-size: 9pt; color: #666;")
         self.lbl_thresh_info.setWordWrap(True)
         self.slicer_layout.addWidget(self.lbl_thresh_info)
         
         self.sidebar_layout.addWidget(self.grp_slicer)
         self.sidebar_layout.addStretch()
         
-        # Add Layout Components
-        main_h_layout.addLayout(self.viz_layout, stretch=5)
-        
+        # Sidebar inside scroll area
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         scroll_area.setWidget(self.sidebar)
-        main_h_layout.addWidget(scroll_area, stretch=1)
+
+        # Combine visualization and sidebar in a user-resizable horizontal splitter
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(viz_container)
+        self.main_splitter.addWidget(scroll_area)
+        self.main_splitter.setStretchFactor(0, VIZ_PANEL_STRETCH)
+        self.main_splitter.setStretchFactor(1, SIDEBAR_PANEL_STRETCH)
+        main_h_layout.addWidget(self.main_splitter)
 
         # Initial state setup.
         self.update_digital_color('Orange')
@@ -360,7 +387,6 @@ class DemodTab(BaseSignalTab):
         if self.chk_slicer.isChecked():
             self.setup_thresholds()
             
-        # Provide immediate feedback instead of waiting 200ms
         self.refresh_plot_data()
 
     def on_range_changed(self, _, viewRange):
@@ -370,7 +396,7 @@ class DemodTab(BaseSignalTab):
         self.region.blockSignals(False)
         
         # Restart the timer. If user is actively scrolling, this keeps resetting
-        self.update_timer.start(100)
+        self.update_timer.start(DEBOUNCE_MS)
 
     def refresh_plot_data(self):
         # Automatically adjust Y-Axis if enabled before drawing points
@@ -393,7 +419,7 @@ class DemodTab(BaseSignalTab):
         min_t, max_t = view_range[0], view_range[1]
         
         # Add a buffer on either side so panning isn't instantly jarring
-        pad_t = (max_t - min_t) * 0.15
+        pad_t = (max_t - min_t) * VIEW_BUFFER_RATIO
         min_t = max(0, min_t - pad_t)
         max_t = min(total_points / sr, max_t + pad_t)
         
@@ -404,16 +430,30 @@ class DemodTab(BaseSignalTab):
         
         # Only extract the exact segment we need
         view_y = self.demod_result[i_start:i_stop]
-        view_x = np.arange(i_start, i_stop) / sr
         
-        # Decide if we pass raw points or let PyQtGraph apply Peak Downsampling
+        # Decide if we pass raw points or apply fast NumPy Peak Downsampling
         num_points = len(view_y)
-        if num_points > self.spin_plot_thresh.value():
-            self.plot_main.setDownsampling(auto=True, mode='peak')
+        thresh = self.spin_plot_thresh.value()
+        ds = 1
+        if num_points > thresh:
             self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [Downsampled]")
+            num_buckets = max(1, thresh // 2)
+            ds = max(1, num_points // num_buckets)
         else:
-            self.plot_main.setDownsampling(auto=False)
             self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [1:1]")
+
+        if ds > 1:
+            n = num_points // ds
+            stx = ds // 2
+            x_sub = (np.arange(n, dtype=np.float64) * ds + (i_start + stx)) / sr
+            view_x = np.repeat(x_sub, 2)
+            y_reshaped = view_y[:n * ds].reshape((n, ds))
+            view_y_ds = np.empty(n * 2, dtype=view_y.dtype)
+            view_y_ds[0::2] = y_reshaped.max(axis=1)
+            view_y_ds[1::2] = y_reshaped.min(axis=1)
+            view_y = view_y_ds
+        else:
+            view_x = np.arange(i_start, i_stop, dtype=np.float64) / sr
             
         self.curve_main.setData(view_x, view_y)
 
@@ -432,7 +472,7 @@ class DemodTab(BaseSignalTab):
         view_range = self.plot_main.viewRange()[0]
         min_t, max_t = view_range[0], view_range[1]
         
-        pad_t = (max_t - min_t) * 0.05
+        pad_t = (max_t - min_t) * VIEW_BUFFER_RATIO
         min_t = max(0, min_t - pad_t)
         max_t = min(total_points / sr, max_t + pad_t)
         
@@ -442,7 +482,6 @@ class DemodTab(BaseSignalTab):
         if i_stop <= i_start: return
         
         view_y = self.demod_result[i_start:i_stop]
-        view_x = np.arange(i_start, i_stop) / sr
         
         if "Phase" in self.cb_mode.currentText():
             thresh = thresh_vals[0] if thresh_vals else 0.5
@@ -457,23 +496,26 @@ class DemodTab(BaseSignalTab):
             # Scale it to look nice overlaid on the analog spikes
             y_max = np.max(view_y) if len(view_y) > 0 else 1.0
             mapped_y = state * (y_max * 0.4) + (y_max * 0.5)
+        else:
+            # Digitize only the visible data for normal AM/FM
+            view_symbols = np.digitize(view_y, thresh_vals)
             
-            self.curve_digital.setData(view_x, mapped_y)
-            return
-        
-        # Digitize only the visible data for normal AM/FM
-        view_symbols = np.digitize(view_y, thresh_vals)
-        
-        mapped_y = np.zeros_like(view_y)
-        unique_syms = np.unique(view_symbols)
-        
-        # Map symbols back to analog levels for the overlay trace.
-        for s in unique_syms:
-            mask = (view_symbols == s)
-            if np.any(mask):
-                val = np.median(view_y[mask])
-                mapped_y[mask] = val
-                
+            mapped_y = np.zeros_like(view_y)
+            unique_syms = np.unique(view_symbols)
+            
+            # Map symbols back to analog levels for the overlay trace.
+            for s in unique_syms:
+                mask = (view_symbols == s)
+                if np.any(mask):
+                    val = np.median(view_y[mask])
+                    mapped_y[mask] = val
+
+        thresh_pts = self.spin_plot_thresh.value()
+        step = max(1, len(view_y) // thresh_pts) if len(view_y) > thresh_pts else 1
+        if step > 1:
+            mapped_y = mapped_y[::step]
+        view_x = np.arange(i_start, i_stop, step, dtype=np.float64) / sr
+
         self.curve_digital.setData(view_x, mapped_y)
 
     def toggle_filter_box(self, checked):
@@ -540,8 +582,17 @@ class DemodTab(BaseSignalTab):
         c = pg.mkColor(hex_color)
         alpha = int((value / 100.0) * 255)
         c.setAlpha(alpha)
-        self.pen_digital = pg.mkPen(c, width=4)
+        self.pen_digital = pg.mkPen(c, width=DIGITAL_PEN_WIDTH)
         self.curve_digital.setPen(self.pen_digital)
+
+    def apply_opaque_grid(self, hex_color):
+        """Render major-only opaque gridlines behind the plot to avoid alpha-blending overhead."""
+        grid_pen = pg.mkPen(hex_color, width=1)
+        for axis_name in ('left', 'bottom'):
+            ax = self.plot_main.getAxis(axis_name)
+            ax.setTickPen(grid_pen)
+            ax.setStyle(tickAlpha=255, maxTickLevel=1)
+            ax.setZValue(-1000)
 
     def toggle_light_mode(self):
         if self.chk_light_mode.isChecked():
@@ -550,7 +601,8 @@ class DemodTab(BaseSignalTab):
             self.plot_main.getAxis('bottom').setPen('k')
             self.plot_main.getAxis('left').setTextPen('k')
             self.plot_main.getAxis('bottom').setTextPen('k')
-            self.curve_main.setPen(pg.mkPen('#006400', width=2))
+            self.apply_opaque_grid('#d8d8d8')
+            self.curve_main.setPen(pg.mkPen('#006400', width=ANALOG_PEN_WIDTH))
             self.filter_region.setBrush(pg.mkBrush(0, 0, 0, 50))
         else:
             self.plot_main.setBackground('#1e1e1e')
@@ -558,7 +610,8 @@ class DemodTab(BaseSignalTab):
             self.plot_main.getAxis('bottom').setPen('w')
             self.plot_main.getAxis('left').setTextPen('w')
             self.plot_main.getAxis('bottom').setTextPen('w')
-            self.curve_main.setPen(pg.mkPen('g', width=3))
+            self.apply_opaque_grid('#383838')
+            self.curve_main.setPen(pg.mkPen('g', width=ANALOG_PEN_WIDTH))
             self.filter_region.setBrush(pg.mkBrush(255, 255, 255, 50))
         
         self.update_digital_color(self.digital_color_name)
@@ -599,13 +652,13 @@ class DemodTab(BaseSignalTab):
         
         if abs(y_max - y_min) < 1e-6:
              if self.demod_result is not None:
-                 y_min = np.percentile(self.demod_result, 1)
-                 y_max = np.percentile(self.demod_result, 99)
+                 y_min = float(np.percentile(self.demod_result, 1))
+                 y_max = float(np.percentile(self.demod_result, 99))
              else: y_min, y_max = -1, 1
         span = y_max - y_min
         
         l_color = '#000000' if self.chk_light_mode.isChecked() else '#FFD700'
-        line_pen = pg.mkPen(l_color, width=3, style=Qt.DashLine) 
+        line_pen = pg.mkPen(l_color, width=3, style=Qt.PenStyle.DashLine) 
 
         for i in range(num_lines):
             step = span / (num_lines + 1)
@@ -648,8 +701,8 @@ class DemodTab(BaseSignalTab):
         view_y = self.demod_result[i_start:i_stop]
         if len(view_y) == 0: return
         
-        y_min = np.min(view_y)
-        y_max = np.max(view_y)
+        y_min = float(np.min(view_y))
+        y_max = float(np.max(view_y))
         
         if abs(y_max - y_min) < 1e-9: margin = 1.0 
         else: margin = (y_max - y_min) * 0.20

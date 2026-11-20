@@ -1,14 +1,38 @@
 import numpy as np
+from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
+                             QPushButton, QGroupBox, QCheckBox,
+                             QSpinBox, QDoubleSpinBox, QScrollArea,
+                             QSizePolicy, QWidget, QSplitter)
+from PyQt6.QtCore import Qt, QTimer
 import pyqtgraph as pg
-from PyQt5.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
-                             QPushButton, QGroupBox, QCheckBox, QSlider,
-                             QSpinBox, QDoubleSpinBox, QMessageBox, QScrollArea)
-from PyQt5.QtCore import Qt, QTimer
 
 # Import the base class.
 from core.base_tab import BaseSignalTab
 # Import dsp utilities.
 import utils.dsp_lib as dsp
+
+# Horizontal split between Left (Visualization) and Right (Sidebar Controls)
+# Setting SIDEBAR_PANEL_STRETCH = 0 lets the sidebar sit at natural sizeHint width
+VIZ_PANEL_STRETCH = 1
+SIDEBAR_PANEL_STRETCH = 0
+
+# Vertical split inside Visualization panel: Main Slicer Plot vs. Minimap
+MAIN_PLOT_STRETCH = 8
+MINI_PLOT_STRETCH = 1
+
+# Debounce delay (ms) before slicing/updating plot after pan/zoom
+DEBOUNCE_MS = 100
+
+# Extra time buffer ratio rendered on either side of the visible plot window
+VIEW_BUFFER_RATIO = 0.25
+
+# Trace line width
+TRACE_PEN_WIDTH = 3
+
+# Maximum number of symbols allowed in the viewport once Auto-Sync is active
+# (or when manual symbol count reaches this threshold) to prevent zoom-out lag
+# plotting all the vertical semi-translucent lines is a performance sink 
+MAX_VISIBLE_SYMBOLS = 256
 
 class SlicerTab(BaseSignalTab):
     def __init__(self, context):
@@ -29,6 +53,7 @@ class SlicerTab(BaseSignalTab):
         # Visual items.
         self.tick_lines = []
         self.digital_color_name = 'Orange'
+        self.last_nav_bounds = None
 
         # Timer for debouncing heavy array slicing and tick updates
         self.update_timer = QTimer()
@@ -42,23 +67,24 @@ class SlicerTab(BaseSignalTab):
         self.layout.addLayout(main_h_layout)
 
         # Visualization
-        self.viz_layout = QVBoxLayout()
+        viz_container = QWidget()
+        self.viz_layout = QVBoxLayout(viz_container)
+        self.viz_layout.setContentsMargins(0, 0, 0, 0)
         
         self.plot_main = pg.PlotWidget()
+        self.plot_main.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.plot_main.setLabel('bottom', 'Time', units='s')
         self.plot_main.setLabel('left', 'Amplitude') 
         self.plot_main.showGrid(x=True, y=True, alpha=0.3)
-        # Optimization
-        self.plot_main.setClipToView(True)
-        self.plot_main.setDownsampling(auto=True, mode='peak')
         self.plot_main.setMouseEnabled(x=True, y=False)
         self.plot_main.setBackground('#1e1e1e')
+        self.apply_opaque_grid('#383838')
         
-        self.pen_digital = pg.mkPen('#FFA500', width=2)
-        self.curve_digital = self.plot_main.plot(pen=self.pen_digital) 
+        self.pen_digital = pg.mkPen('#FFA500', width=TRACE_PEN_WIDTH)
+        self.curve_digital = self.plot_main.plot(pen=self.pen_digital, dynamicRangeLimit=None) 
         
         # Zero-Line Reference
-        self.zero_line = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#555555', width=1, style=Qt.DashLine))
+        self.zero_line = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#555555', width=1, style=Qt.PenStyle.DashLine))
         self.plot_main.addItem(self.zero_line)
         
         # Clock Region (The interactive manual box).
@@ -71,6 +97,7 @@ class SlicerTab(BaseSignalTab):
         # Hook up clock region changes
         self.clock_region.sigRegionChanged.connect(self.update_clock_ticks)
         self.clock_region.sigRegionChanged.connect(self.extract_symbols)
+        self.clock_region.sigRegionChanged.connect(self.on_clock_region_changed)
         self.plot_main.addItem(self.clock_region)
         
         # Auto-Sync Boundary Line (Red Solid)
@@ -81,13 +108,13 @@ class SlicerTab(BaseSignalTab):
         # Stop line (limit for auto sync).
         self.stop_line = pg.InfiniteLine(
             pos=0, angle=90, movable=True, 
-            pen=pg.mkPen('#FF00FF', width=3, style=Qt.DashLine),
+            pen=pg.mkPen('#FF00FF', width=3, style=Qt.PenStyle.DashLine),
             label='STOP LIMIT', labelOpts={'position': 0.95, 'color': '#FF00FF'}
         )
         self.stop_line.setVisible(False) 
         self.plot_main.addItem(self.stop_line)
         
-        self.viz_layout.addWidget(self.plot_main)
+        self.viz_layout.addWidget(self.plot_main, stretch=MAIN_PLOT_STRETCH)
 
         # Floating Y-Axis Controls Overlay
         overlay_layout = QVBoxLayout(self.plot_main)
@@ -99,35 +126,35 @@ class SlicerTab(BaseSignalTab):
         self.btn_locate_cursor = QPushButton("Locate Cursor")
         self.btn_y_in = QPushButton("+")
         self.btn_y_out = QPushButton("-")
+        self.btn_locate_cursor.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.btn_y_in.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.btn_y_out.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         
         locate_style = """
             QPushButton {
-                background-color: rgba(60, 60, 60, 150);
+                background-color: #3c3c3c;
                 color: white;
                 font-weight: bold;
-                font-size: 13px;
+                font-size: 10pt;
+                border: 1px solid #555555;
                 border-radius: 4px;
-                padding: 0 10px;
-                min-height: 30px;
-                max-height: 30px;
+                padding: 4px 10px;
             }
-            QPushButton:hover { background-color: rgba(100, 100, 100, 200); }
+            QPushButton:hover { background-color: #5a5a5a; }
         """
         self.btn_locate_cursor.setStyleSheet(locate_style)
         
         btn_style = """
             QPushButton {
-                background-color: rgba(60, 60, 60, 150);
+                background-color: #3c3c3c;
                 color: white;
                 font-weight: bold;
-                font-size: 18px;
+                font-size: 12pt;
+                border: 1px solid #555555;
                 border-radius: 4px;
-                min-width: 30px;
-                max-width: 30px;
-                min-height: 30px;
-                max-height: 30px;
+                padding: 2px 10px;
             }
-            QPushButton:hover { background-color: rgba(100, 100, 100, 200); }
+            QPushButton:hover { background-color: #5a5a5a; }
         """
         self.btn_y_in.setStyleSheet(btn_style)
         self.btn_y_out.setStyleSheet(btn_style)
@@ -137,7 +164,6 @@ class SlicerTab(BaseSignalTab):
         self.btn_y_out.clicked.connect(self.manual_y_zoom_out)
         
         btn_row.addWidget(self.btn_locate_cursor)
-        btn_row.addSpacing(10)
         btn_row.addWidget(self.btn_y_in)
         btn_row.addWidget(self.btn_y_out)
         
@@ -146,7 +172,7 @@ class SlicerTab(BaseSignalTab):
         
         # Mini map
         self.plot_mini = pg.PlotWidget()
-        self.plot_mini.setFixedHeight(80)
+        self.plot_mini.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.plot_mini.hideAxis('bottom')
         self.plot_mini.hideAxis('left')
         self.plot_mini.setBackground('#1e1e1e')
@@ -159,11 +185,11 @@ class SlicerTab(BaseSignalTab):
         # Connect main plot range changes to our debounced handler
         self.plot_main.sigRangeChanged.connect(self.on_range_changed)
         
-        self.viz_layout.addWidget(self.plot_mini)
+        self.viz_layout.addWidget(self.plot_mini, stretch=MINI_PLOT_STRETCH)
 
         # Sidebar Controls
         self.sidebar = QGroupBox("Clock Recovery")
-        self.sidebar.setMinimumWidth(250)
+        self.sidebar.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.sidebar_layout = QVBoxLayout()
         self.sidebar.setLayout(self.sidebar_layout)
         
@@ -184,7 +210,6 @@ class SlicerTab(BaseSignalTab):
         self.spin_symbols.valueChanged.connect(self.check_auto_enable) 
         row_sym.addWidget(self.spin_symbols)
         self.sidebar_layout.addLayout(row_sym)
-        self.sidebar_layout.addSpacing(10)
         
         autoscale_layout = QHBoxLayout()
         self.btn_autoscale = QPushButton("Auto Scale Y-Axis")
@@ -196,7 +221,6 @@ class SlicerTab(BaseSignalTab):
         autoscale_layout.addWidget(self.chk_auto_autoscale)
         
         self.sidebar_layout.addLayout(autoscale_layout)
-        self.sidebar_layout.addSpacing(20)
 
         # Visuals.
         self.grp_vis = QGroupBox("2. Visual Settings")
@@ -205,7 +229,7 @@ class SlicerTab(BaseSignalTab):
 
         # View Settings
         self.lbl_active_points = QLabel("Visible Points: --")
-        self.lbl_active_points.setStyleSheet("font-size: 11px; color: #888; font-weight: bold;")
+        self.lbl_active_points.setStyleSheet("font-size: 9pt; color: #888; font-weight: bold;")
         self.vis_layout.addWidget(self.lbl_active_points)
         
         row_thresh = QHBoxLayout()
@@ -223,7 +247,6 @@ class SlicerTab(BaseSignalTab):
         self.chk_light_mode.stateChanged.connect(self.toggle_light_mode)
         self.vis_layout.addWidget(self.chk_light_mode)
         
-        self.vis_layout.addSpacing(10)
         self.vis_layout.addWidget(QLabel("Trace Color:"))
         self.cb_color = QComboBox()
         self.cb_color.addItems(['Orange', 'Lime', 'Cyan', 'Magenta', 'Yellow', 'White/Black', 'Blue'])
@@ -231,7 +254,6 @@ class SlicerTab(BaseSignalTab):
         self.vis_layout.addWidget(self.cb_color)
         
         self.sidebar_layout.addWidget(self.grp_vis)
-        self.sidebar_layout.addSpacing(20)
         
         # Section 3: Auto Sync.
         self.grp_auto = QGroupBox("3. Auto-Sync (PLL)")
@@ -251,8 +273,6 @@ class SlicerTab(BaseSignalTab):
         self.chk_stop_limit.stateChanged.connect(self.toggle_stop_line)
         self.auto_layout.addWidget(self.chk_stop_limit)
         
-        self.auto_layout.addSpacing(5)
-        
         row_auto_btns = QHBoxLayout()
         self.btn_auto_sync = QPushButton("Auto-Sync")
         self.btn_auto_sync.setEnabled(False) 
@@ -269,7 +289,7 @@ class SlicerTab(BaseSignalTab):
         self.auto_layout.addLayout(row_auto_btns)
         
         self.lbl_auto_status = QLabel("Status: Manual Mode")
-        self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
+        self.lbl_auto_status.setStyleSheet("color: #666; font-size: 9pt;")
         self.auto_layout.addWidget(self.lbl_auto_status)
 
         self.lbl_baud_metric = QLabel("")
@@ -284,7 +304,6 @@ class SlicerTab(BaseSignalTab):
         
         self.sidebar_layout.addWidget(self.grp_auto)
         
-        self.sidebar_layout.addSpacing(10)
         self.lbl_debug = QLabel("Drag the white box edges to manually align ticks with symbol zero-crossings.")
         self.lbl_debug.setWordWrap(True)
         self.lbl_debug.setStyleSheet("color: #666; font-style: italic;")
@@ -292,13 +311,23 @@ class SlicerTab(BaseSignalTab):
         
         self.sidebar_layout.addStretch()
 
-        # Add Layout Components
-        main_h_layout.addLayout(self.viz_layout, stretch=5)
-        
+        # Sidebar inside scroll area
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         scroll_area.setWidget(self.sidebar)
-        main_h_layout.addWidget(scroll_area, stretch=1)
+
+        # Combine visualization and sidebar in a user-resizable horizontal splitter
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(viz_container)
+        self.main_splitter.addWidget(scroll_area)
+        self.main_splitter.setStretchFactor(0, VIZ_PANEL_STRETCH)
+        self.main_splitter.setStretchFactor(1, SIDEBAR_PANEL_STRETCH)
+        main_h_layout.addWidget(self.main_splitter)
 
         # Init state.
         self.update_digital_color('Orange')
@@ -346,6 +375,7 @@ class SlicerTab(BaseSignalTab):
              self.nav_region.blockSignals(True)
              self.nav_region.setRegion([0, zoom_t])
              self.nav_region.blockSignals(False)
+             self.last_nav_bounds = (0, zoom_t)
              
              # Reset clock box.
              box_width = zoom_t * 0.2
@@ -374,12 +404,13 @@ class SlicerTab(BaseSignalTab):
 
     def on_range_changed(self, _, viewRange):
         # Visually sync the minimap box immediately
+        self.last_nav_bounds = tuple(viewRange[0])
         self.nav_region.blockSignals(True)
         self.nav_region.setRegion(viewRange[0])
         self.nav_region.blockSignals(False)
         
         # Restart the timer to debounce the plot update
-        self.update_timer.start(50)
+        self.update_timer.start(DEBOUNCE_MS)
 
     def refresh_plot_data(self):
         # Automatically adjust Y-Axis if enabled before drawing points
@@ -399,7 +430,7 @@ class SlicerTab(BaseSignalTab):
         min_t, max_t = view_range[0], view_range[1]
         
         # Add a buffer on either side for panning
-        pad_t = (max_t - min_t) * 0.25
+        pad_t = (max_t - min_t) * VIEW_BUFFER_RATIO
         min_t = max(0, min_t - pad_t)
         max_t = min(total_points / sr, max_t + pad_t)
         
@@ -410,16 +441,30 @@ class SlicerTab(BaseSignalTab):
         
         # Only extract the exact segment we need
         view_y = self.centered_analog_data[i_start:i_stop]
-        view_x = np.arange(i_start, i_stop) / sr
         
-        # Decide if we pass raw points or let PyQtGraph apply peak-downsampling
+        # Decide if we pass raw points or apply fast NumPy Peak Downsampling
         num_points = len(view_y)
-        if num_points > self.spin_plot_thresh.value():
-            self.plot_main.setDownsampling(auto=True, mode='peak')
+        thresh = self.spin_plot_thresh.value()
+        ds = 1
+        if num_points > thresh:
             self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [Downsampled]")
+            num_buckets = max(1, thresh // 2)
+            ds = max(1, num_points // num_buckets)
         else:
-            self.plot_main.setDownsampling(auto=False)
             self.lbl_active_points.setText(f"Visible Points: {num_points:,}  [1:1]")
+
+        if ds > 1:
+            n = num_points // ds
+            stx = ds // 2
+            x_sub = (np.arange(n, dtype=np.float64) * ds + (i_start + stx)) / sr
+            view_x = np.repeat(x_sub, 2)
+            y_reshaped = view_y[:n * ds].reshape((n, ds))
+            view_y_ds = np.empty(n * 2, dtype=view_y.dtype)
+            view_y_ds[0::2] = y_reshaped.max(axis=1)
+            view_y_ds[1::2] = y_reshaped.min(axis=1)
+            view_y = view_y_ds
+        else:
+            view_x = np.arange(i_start, i_stop, dtype=np.float64) / sr
             
         self.curve_digital.setData(view_x, view_y)
 
@@ -487,6 +532,11 @@ class SlicerTab(BaseSignalTab):
         self.clock_region.setRegion([min_x, min_x + new_width])
         self.last_symbol_count = new_count
         self.check_auto_enable()
+        self.apply_zoom_limits()
+
+    def on_clock_region_changed(self):
+        if self.auto_clock_centers is None and self.spin_symbols.value() >= MAX_VISIBLE_SYMBOLS:
+            self.apply_zoom_limits()
 
     def update_clock_ticks(self):
         # Draws the vertical clock lines based on Manual + Auto states.
@@ -510,7 +560,7 @@ class SlicerTab(BaseSignalTab):
             
         if not edges_to_draw: return
         
-        tick_pen = pg.mkPen('#FF5555', style=Qt.DashLine, width=2)
+        tick_pen = pg.mkPen('#FF5555', style=Qt.PenStyle.DashLine, width=2)
         view_min, view_max = self.plot_main.viewRange()[0]
         
         # Convert to numpy array for fast filtering
@@ -523,8 +573,8 @@ class SlicerTab(BaseSignalTab):
         visible_edges = edges_arr[(edges_arr >= view_min - pad_width) & (edges_arr <= view_max + pad_width)]
         
         # Max lines on screen check to protect UI thread
-        if len(visible_edges) > 300:
-            visible_edges = visible_edges[::len(visible_edges)//300]
+        if len(visible_edges) > MAX_VISIBLE_SYMBOLS:
+            visible_edges = visible_edges[::len(visible_edges)//MAX_VISIBLE_SYMBOLS]
             
         for x_pos in visible_edges:
             l = pg.InfiniteLine(angle=90, movable=False, pen=tick_pen)
@@ -591,6 +641,7 @@ class SlicerTab(BaseSignalTab):
                     self.lbl_sps_metric.setText(f"SPS: {sps:.2f}")
                     self.lbl_sps_metric.setVisible(True)
             
+            self.apply_zoom_limits()
             self.refresh_plot_data()
             self.extract_symbols()
 
@@ -609,7 +660,7 @@ class SlicerTab(BaseSignalTab):
         self.toggle_lock_position() # Apply correct lock state for lines
         
         self.lbl_auto_status.setText("Status: Manual Mode")
-        self.lbl_auto_status.setStyleSheet("color: #666; font-size: 11px;")
+        self.lbl_auto_status.setStyleSheet("color: #666; font-size: 9pt;")
         
         self.lbl_baud_metric.setText("")
         self.lbl_baud_metric.setVisible(False)
@@ -617,24 +668,25 @@ class SlicerTab(BaseSignalTab):
         self.lbl_sps_metric.setVisible(False)
         
         self.check_auto_enable()
+        self.apply_zoom_limits()
         self.refresh_plot_data()
         self.extract_symbols()
 
     def autoscale_view(self):
         if self.centered_analog_data is None: return
-        x_data, y_data = self.curve_digital.getData()
-        if x_data is None: return
         
         min_t, max_t = self.nav_region.getRegion()
-        i_start = np.searchsorted(x_data, min_t)
-        i_stop = np.searchsorted(x_data, max_t)
+        sr = self.local_sr
+        
+        i_start = max(0, int(min_t * sr))
+        i_stop = min(len(self.centered_analog_data), int(max_t * sr))
         if i_stop <= i_start: return
         
-        view_y = y_data[i_start:i_stop]
+        view_y = self.centered_analog_data[i_start:i_stop]
         if len(view_y) == 0: return
         
-        y_min = np.min(view_y)
-        y_max = np.max(view_y)
+        y_min = float(np.min(view_y))
+        y_max = float(np.max(view_y))
         if abs(y_max - y_min) < 1e-9: margin = 1.0 
         else: margin = (y_max - y_min) * 0.20 
         
@@ -646,7 +698,7 @@ class SlicerTab(BaseSignalTab):
         min_x, max_x = view_range[0], view_range[1]
         view_width = max_x - min_x
         
-        # Calculate new region bounds (20% of width, centered)
+        # Calculate new region bounds
         box_width = view_width * 0.20
         center_x = min_x + (view_width / 2.0)
         
@@ -697,7 +749,7 @@ class SlicerTab(BaseSignalTab):
             self.clock_region.setMovable(False)
             for line in self.clock_region.lines:
                 line.setMovable(True)
-                line.setAcceptedMouseButtons(Qt.LeftButton)
+                line.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
         else:
             self.clock_region.setMovable(True)
             for line in self.clock_region.lines:
@@ -727,8 +779,17 @@ class SlicerTab(BaseSignalTab):
     def update_digital_color(self, color_name):
         self.digital_color_name = color_name
         hex_color = self.get_adaptive_color(color_name)
-        self.pen_digital = pg.mkPen(pg.mkColor(hex_color), width=2)
+        self.pen_digital = pg.mkPen(pg.mkColor(hex_color), width=TRACE_PEN_WIDTH)
         self.curve_digital.setPen(self.pen_digital)
+
+    def apply_opaque_grid(self, hex_color):
+        """Render major-only opaque gridlines behind the plot to avoid alpha-blending overhead."""
+        grid_pen = pg.mkPen(hex_color, width=1)
+        for axis_name in ('left', 'bottom'):
+            ax = self.plot_main.getAxis(axis_name)
+            ax.setTickPen(grid_pen)
+            ax.setStyle(tickAlpha=255, maxTickLevel=1)
+            ax.setZValue(-1000)
 
     def toggle_light_mode(self):
         if self.chk_light_mode.isChecked():
@@ -737,6 +798,7 @@ class SlicerTab(BaseSignalTab):
             self.plot_main.getAxis('bottom').setPen('k')
             self.plot_main.getAxis('left').setTextPen('k')
             self.plot_main.getAxis('bottom').setTextPen('k')
+            self.apply_opaque_grid('#d8d8d8')
             self.clock_region.setBrush(pg.mkBrush(0, 0, 0, 50)) 
         else:
             self.plot_main.setBackground('#1e1e1e')
@@ -744,10 +806,53 @@ class SlicerTab(BaseSignalTab):
             self.plot_main.getAxis('bottom').setPen('w')
             self.plot_main.getAxis('left').setTextPen('w')
             self.plot_main.getAxis('bottom').setTextPen('w')
+            self.apply_opaque_grid('#383838')
             self.clock_region.setBrush(pg.mkBrush(255, 255, 255, 30))
         
         self.update_digital_color(self.digital_color_name)
 
+    def get_max_view_span(self):
+        # Returns the maximum allowed viewport time span (MAX_VISIBLE_SYMBOLS)
+        # when Auto-Sync is active or manual symbol count >= MAX_VISIBLE_SYMBOLS.
+        if self.auto_clock_centers is not None and len(self.auto_clock_centers) > 1:
+            sym_dur = float(np.median(np.diff(self.auto_clock_centers)))
+            if sym_dur > 0:
+                return sym_dur * MAX_VISIBLE_SYMBOLS
+        elif self.spin_symbols.value() >= MAX_VISIBLE_SYMBOLS:
+            c_min, c_max = self.clock_region.getRegion()
+            sym_dur = (c_max - c_min) / self.spin_symbols.value()
+            if sym_dur > 0:
+                return sym_dur * MAX_VISIBLE_SYMBOLS
+        return None
+
+    def apply_zoom_limits(self):
+        max_span = self.get_max_view_span()
+        self.plot_main.setLimits(maxXRange=max_span)
+        if max_span is not None:
+            min_x, max_x = self.nav_region.getRegion()
+            if (max_x - min_x) > max_span:
+                new_max = min_x + max_span
+                self.nav_region.blockSignals(True)
+                self.nav_region.setRegion([min_x, new_max])
+                self.nav_region.blockSignals(False)
+                self.last_nav_bounds = (min_x, new_max)
+                self.plot_main.setXRange(min_x, new_max, padding=0)
+
     def update_zoom_from_nav(self):
         min_x, max_x = self.nav_region.getRegion()
+        max_span = self.get_max_view_span()
+        if max_span is not None and (max_x - min_x) > max_span:
+            if self.last_nav_bounds is not None:
+                last_min, last_max = self.last_nav_bounds
+                # Keep the stationary edge anchored while clamping the moved edge
+                if abs(min_x - last_min) > abs(max_x - last_max):
+                    min_x = max_x - max_span
+                else:
+                    max_x = min_x + max_span
+            else:
+                max_x = min_x + max_span
+            self.nav_region.blockSignals(True)
+            self.nav_region.setRegion([min_x, max_x])
+            self.nav_region.blockSignals(False)
+        self.last_nav_bounds = (min_x, max_x)
         self.plot_main.setXRange(min_x, max_x, padding=0)
