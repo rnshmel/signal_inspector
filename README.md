@@ -1,6 +1,6 @@
 # Signal Inspector
 
-**Version:** 2.0.0
+**Version:** 2.1.0
  
 A Digital Signals Processing (DSP) tool designed for inspecting and reverse-engineering basic signals via IQ recordings. Built with Python 3, PyQt6, PyQtGraph, NumPy, and SciPy.
 
@@ -58,8 +58,8 @@ The Inspector operates as a linear pipeline. Data does not automatically flow be
 
 ### 1. Spectrogram View (Source)
 The entry point for raw IQ data. Supports `cf32` (Complex Float 32), `cs16` (Complex Int 16), `cs8` (Complex Int 8), and `cu8` (Complex Unsigned 8) recordings.
-- **Controls:** Open IQ recordings and pan/zoom across a debounced waterfall with a full-duration minimap.
-- **Mosaic View:** If zoomed out on massive files beyond the configured RAM limit, you can enable a "Mosaic" stride to visualize the entire file duration without taxing RAM.
+- **Controls:** Open IQ recordings and pan/zoom across a debounced waterfall with a full-duration minimap (switchable between cached **RMS** and **Peak** amplitude envelopes) and a top-left status/percentage indicator during file scans and spectrogram computation.
+- **Strided / Mosaic View:** If zoomed out on massive files beyond the configured `Max RAM (MB)` limit, toggle **Enable Strided View** to visualize the entire time range without exceeding RAM.
 
 ### 2. Tuner and Filter (Extraction)
 Isolates a specific signal of interest from the wideband recording.
@@ -77,13 +77,14 @@ Converts complex IQ samples into real-valued analog signals.
   - **Frequency (FSK):** Phase differencing.
   - **Phase (PSK):** Delayed-conjugate differential phase detection.
 - **Matched Filtering (Optional):** Apply Moving Average, Gaussian, or Root-Raised Cosine (RRC) filtering sized interactively with the on-plot box.
+- **Sliding Normalization (`Advanced`):** Optionally normalize amplitude/offset drift to `[-1.0, +1.0]` using an interactive on-plot normalization window box, with one-click reset.
 - **Slicer Preview:** Overlay threshold lines on the analog waveform to visualize how discrete symbol levels will be decided.
 
 ### 4. Symbol Timing Recovery (Digital)
 Converts analog signals into discrete symbols (0, 1, 2, 3, etc) via user-aided symbol recovery.
 - **Input:** Demodulated Analog Signal + Thresholds (from Tab 3).
 - **Manual Clocking:** Drag the "Clock Region" box to align with the edges of your symbols.
-- **Auto-Sync (Beta):** After manually aligning 4+ symbols, the tool can algorithmically estimate the clock for the rest of the burst.
+- **Auto-Sync:** After manually aligning symbols, track the symbol clock across the burst with configurable 2nd-order or 3rd-order (CFO/drift-tracking) PLL modes under `Advanced`, tunable loop gains ($\alpha$, $\beta$, $\gamma$), outlier rejection, frequency clamping, and optional plot overlays (ZC Threshold, Sampling Points, Symbol Bounds).
 
 ### 5. Data Inspector (Analysis)
 Basic reverse engineering.
@@ -103,14 +104,14 @@ Basic reverse engineering.
 The project follows a modular pattern where:
 - **Core (`core/`):** The `SignalContext` and `BaseSignalTab` templates.
 - **Tabs (`tabs/`):** The individual processing modules.
-- **Utils (`utils/`):** All pure DSP math functions (SciPy/NumPy).
+- **Utils (`utils/`):** Pure DSP, IQ file I/O, and clock recovery utilities (SciPy/NumPy).
 
 ### The Data Backbone: `SignalContext`
 Data is passed between tabs via a shared object called `SignalContext`. Data is categorized by "Generations":
 
 | Generation | Data Type | Source | Description |
 | :--- | :--- | :--- | :--- |
-| **Gen 0** | `raw_iq_handle` | Tab 1 | `np.memmap` reference to the disk file. Read-only. |
+| **Gen 0** | `raw_iq_handle` | Tab 1 | `MappedIQWrapper` (`utils/iq_io_lib.py`) wrapping a read-only `np.memmap` and random-access file descriptor. |
 | **Gen 1** | `filtered_signal` | Tab 2 | `complex64` array. Baseband, filtered slice. |
 | **Gen 2** | `demod_signal` | Tab 3 | `float32` array. Magnitude or Freq Deviation. |
 | **Gen 3** | `symbols` | Tab 4 | `int8` array. Discrete symbol indices. |
@@ -140,7 +141,7 @@ To add a new module (e.g., "OFDM Demodulator"):
 5. **Register:** Add the tab to `apps/basic_signal_inspector.py`.
 
 ### DSP Utilities
-All heavy mathematical lifting resides in `utils/dsp_lib.py`. This ensures consistency across tabs and allows for easier unit testing.
+Core spectral, tuning, demodulation, and filtering math resides in `utils/dsp_lib.py`, IQ file memory-mapping lives in `utils/iq_io_lib.py`, and PLL clock recovery/slicing resides in `utils/clock_recovery_lib.py`. This ensures consistency across tabs and allows for easier unit testing.
 
 ### Deployment
 Environment setup and execution are split across two scripts:

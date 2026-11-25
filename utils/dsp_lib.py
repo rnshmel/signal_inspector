@@ -1,79 +1,6 @@
 import numpy as np
 import scipy.signal
 
-class MappedIQWrapper:
-    # Proxy class that wraps integer numpy memmaps.
-
-    def __init__(self, filepath, fmt):
-        self.fmt = fmt.split()[0]
-        
-        if self.fmt == 'cf32':
-            self._mmap = np.memmap(filepath, dtype=np.complex64, mode='r')
-            self.length = len(self._mmap)
-        elif self.fmt == 'cs16':
-            self._mmap = np.memmap(filepath, dtype=np.int16, mode='r')
-            self.length = len(self._mmap) // 2
-        elif self.fmt == 'cs8':
-            self._mmap = np.memmap(filepath, dtype=np.int8, mode='r')
-            self.length = len(self._mmap) // 2
-        elif self.fmt == 'cu8':
-            self._mmap = np.memmap(filepath, dtype=np.uint8, mode='r')
-            self.length = len(self._mmap) // 2
-        else:
-            raise ValueError(f"Unknown format: {self.fmt}")
-            
-    def __len__(self):
-        return self.length
-        
-    def __getitem__(self, key):
-        # Native complex float 32
-        if self.fmt == 'cf32':
-            return self._mmap[key]
-            
-        # Intercept and map slicing operations
-        if isinstance(key, slice):
-            start = key.start if key.start is not None else 0
-            stop = key.stop if key.stop is not None else self.length
-            step = key.step if key.step is not None else 1
-            
-            if start < 0: start += self.length
-            if stop < 0: stop += self.length
-            
-            stop = min(stop, self.length)
-            
-            # Map complex to real interleaved bounds
-            start_r = start * 2
-            stop_r = stop * 2
-            step_r = step * 2
-            
-            i_data = self._mmap[start_r : stop_r : step_r].astype(np.float32)
-            q_data = self._mmap[start_r + 1 : stop_r : step_r].astype(np.float32)
-            
-            # Reconstruct and scale
-            if self.fmt == 'cs16':
-                return ((i_data + 1j * q_data) / 32768.0).astype(np.complex64)
-            elif self.fmt == 'cs8':
-                return ((i_data + 1j * q_data) / 128.0).astype(np.complex64)
-            elif self.fmt == 'cu8':
-                return (((i_data - 127.5) + 1j * (q_data - 127.5)) / 128.0).astype(np.complex64)
-
-        elif isinstance(key, int):
-            if key < 0: key += self.length
-            if key >= self.length or key < 0: raise IndexError("Index out of bounds")
-            
-            idx = key * 2
-            i_val = float(self._mmap[idx])
-            q_val = float(self._mmap[idx+1])
-            
-            if self.fmt == 'cs16':
-                return np.complex64((i_val + 1j * q_val) / 32768.0)
-            elif self.fmt == 'cs8':
-                return np.complex64((i_val + 1j * q_val) / 128.0)
-            elif self.fmt == 'cu8':
-                return np.complex64(((i_val - 127.5) + 1j * (q_val - 127.5)) / 128.0)
-        else:
-            raise TypeError("Invalid index type")
-
 def compute_spectrogram(data, sr, fft_size=1024, overlap=0):
     # Computes a magnitude spectrogram in dB.
     # Returns (Sxx_db, extent).
@@ -87,10 +14,13 @@ def compute_spectrogram(data, sr, fft_size=1024, overlap=0):
     
     # Shift zero frequency to the center.
     Sxx = np.fft.fftshift(Sxx, axes=0)
-    
-    # Convert to log scale (dB).
+
+    # Convert to log scale (dB) in float32 to avoid float64 upcast.
     # Add a tiny epsilon to prevent log(0).
-    Sxx_db = 20 * np.log10(Sxx + 1e-9)
+    Sxx_db = np.asarray(Sxx, dtype=np.float32)
+    np.add(Sxx_db, np.float32(1e-9), out=Sxx_db)
+    np.log10(Sxx_db, out=Sxx_db)
+    Sxx_db *= np.float32(20.0)
     
     # Calculate image extent for plotting [min_t, max_t, min_f, max_f].
     duration = len(data) / sr
@@ -98,7 +28,7 @@ def compute_spectrogram(data, sr, fft_size=1024, overlap=0):
     
     return Sxx_db, extent
 
-def compute_mosaic_spectrogram(data_handle, sr, start_idx, stop_idx, fft_size=1024, target_width=2000):
+def compute_mosaic_spectrogram(data_handle, sr, start_idx, stop_idx, fft_size=1024, target_width=2000, progress_cb=None):
     # Computes a mosaic (time-sparse) spectrogram in dB.
     # Returns (Sxx_db, extent).
 
@@ -119,25 +49,41 @@ def compute_mosaic_spectrogram(data_handle, sr, start_idx, stop_idx, fft_size=10
     
     if actual_width == 0: return None, [0, 0, 0, 0]
 
-    # Compute dimensions using a single slice.
-    first_chunk = data_handle[start_idx : start_idx + fft_size]
-    _, _, Sxx_sample = scipy.signal.spectrogram(first_chunk, fs=sr, nperseg=fft_size, 
-                                            detrend=False, mode='magnitude', return_onesided=False)
-    rows = Sxx_sample.shape[0]
-    
     # Allocate the matrix [Freq Rows x Time Cols]
-    mosaic_sxx = np.zeros((rows, actual_width), dtype=np.float32)
-    
-    # Fill columns
-    for i, idx in enumerate(window_starts):
-        chunk = data_handle[idx : idx + fft_size]
-        _, _, col_sxx = scipy.signal.spectrogram(chunk, fs=sr, nperseg=fft_size, 
-                                            detrend=False, mode='magnitude', return_onesided=False)
-        mosaic_sxx[:, i] = col_sxx.flatten()
+    mosaic_sxx = np.empty((fft_size, actual_width), dtype=np.float32)
 
-    # Shift and return
-    mosaic_sxx = np.fft.fftshift(mosaic_sxx, axes=0)
-    Sxx_db = 20 * np.log10(mosaic_sxx + 1e-9)
+    # Process in bounded-RAM batches so large FFT sizes stay within a few MB
+    batch_cols = max(1, min(64, (1024 * 1024) // max(1, fft_size)))
+    use_sparse = hasattr(data_handle, "read_sparse_chunks")
+
+    for b0 in range(0, actual_width, batch_cols):
+        b1 = min(b0 + batch_cols, actual_width)
+        batch_starts = window_starts[b0:b1]
+
+        if use_sparse:
+            sub_cb = (lambda done, _tot, base=b0: progress_cb(base + done, actual_width)) if progress_cb is not None else None
+            batch_chunks = data_handle.read_sparse_chunks(batch_starts, fft_size, progress_cb=sub_cb)
+        else:
+            batch_chunks = np.stack([data_handle[idx : idx + fft_size] for idx in batch_starts], axis=0)
+
+        _, _, batch_sxx = scipy.signal.spectrogram(
+            batch_chunks,
+            fs=sr,
+            nperseg=fft_size,
+            detrend=False,
+            mode='magnitude',
+            return_onesided=False,
+            axis=-1,
+        )
+        mosaic_sxx[:, b0:b1] = batch_sxx[:, :, 0].T
+        if not use_sparse and progress_cb is not None:
+            progress_cb(b1, actual_width)
+
+    # Shift and convert to dB in float32 in-place (fftshift returns a fresh float32 array).
+    Sxx_db = np.fft.fftshift(mosaic_sxx, axes=0)
+    np.add(Sxx_db, np.float32(1e-9), out=Sxx_db)
+    np.log10(Sxx_db, out=Sxx_db)
+    Sxx_db *= np.float32(20.0)
     duration = count / sr
     extent = [0, duration, -sr/2, sr/2]
     
@@ -210,18 +156,6 @@ def demodulate_dpsk(data, k_offset):
     # Extract the absolute phase angle
     return np.abs(np.angle(mult))
 
-def slice_signal(analog_data, thresholds):
-    # Converts analog float data to integer symbols based on thresholds.
-    # Returns int array (0, 1, 2, 3, etc).
-    if not thresholds:
-        # Default binary if no thresholds provided.
-        # Use simple mean.
-        thresh = [np.mean(analog_data)]
-    else:
-        thresh = thresholds
-        
-    return np.digitize(analog_data, thresh)
-
 def apply_matched_filter(data, filter_type, length, beta=0.35):
     # Generates and applies a matched filter to the input data array.
     # Returns the filtered numpy array.
@@ -286,126 +220,54 @@ def _generate_rrc(length, beta):
     # Normalize
     return taps / np.sqrt(np.sum(taps**2))
 
-# Extracts clock timings using a proportional phase-locked loop (PLL) on zero-crossings.
-# Assumes analog_data is already DC-centered (CFO corrected).
-def find_clock_sync(analog_data, sr, start_time, current_width, current_count, alpha=0.25, limit_time=None):
-    # Extracts clock timings using a proportional phase-locked loop (PLL) on zero-crossings.
-    # Assumes analog_data is already DC-centered (CFO corrected).
 
-    # Establish the manual seed
-    sps_time = current_width / current_count
-    manual_boundary = start_time + current_width
-    
-    clock_centers = []
+def apply_sliding_normalization(data, window_len):
+    """Normalize a 1D signal to [-1.0, +1.0] using strided overlapping min/max windows."""
+    if data is None or len(data) == 0:
+        return data
 
-    beta = alpha / 10.0
-    
-    # Generate the manual symbol centers (half an SPS offset from the edges)
-    for i in range(current_count):
-        clock_centers.append(start_time + (i + 0.5) * sps_time)
-        
-    # Setup PLL
-    cursor_edge_t = manual_boundary
-    current_sps_t = sps_time
-    
-    limit_idx = len(analog_data)
-    if limit_time is not None:
-        limit_idx = min(limit_idx, int(limit_time * sr))
-        
-    added_symbols = 0
-    
-    # Run the loop
-    while True:
-        expected_edge_t = cursor_edge_t + current_sps_t
-        expected_edge_idx = int(expected_edge_t * sr)
-        
-        if expected_edge_idx >= limit_idx:
-            break
-            
-        # Search window: +/- 0.5 SPS
-        search_radius_t = 0.5 * current_sps_t
-        search_radius_idx = int(search_radius_t * sr)
-        
-        w_start = max(0, expected_edge_idx - search_radius_idx)
-        w_stop = min(limit_idx - 1, expected_edge_idx + search_radius_idx)
-        
-        if w_start >= w_stop:
-            break
-            
-        # Find zero crossings
-        chunk = analog_data[w_start:w_stop]
-        crossings = np.where(np.diff(np.signbit(chunk)))[0]
-        
-        if len(crossings) > 0:
-            # Find the crossing closest to our expected edge
-            relative_target = expected_edge_idx - w_start
-            best_idx = (np.abs(crossings - relative_target)).argmin()
-            
-            # Linear interpolation of zero crossing
-            c_idx = crossings[best_idx]
-            y0 = chunk[c_idx]
-            y1 = chunk[c_idx + 1]
-            span = abs(y0) + abs(y1)
-            
-            frac_offset = 0.0 if span == 0 else abs(y0) / span
-            
-            # Add frac_offset to get the exact continuous index
-            actual_edge_idx_float = w_start + c_idx + frac_offset 
-            actual_edge_t = actual_edge_idx_float / sr
-            
-            # Proportional error calculation
-            error_t = actual_edge_t - expected_edge_t
-            
-            # Linear penalty based on distance from expected (0.0 to 1.0)
-            penalty = max(0.0, 1.0 - (abs(error_t) / search_radius_t))
-            effective_alpha = alpha * penalty
-            effective_beta = beta * penalty
-            
-            # Update phase
-            cursor_edge_t = expected_edge_t + (error_t * effective_alpha)
-            current_sps_t += (error_t * effective_beta)
+    window_len = int(window_len)
+    if window_len < 2:
+        return data
 
-        else:
-            # No zero crossing found.
-            cursor_edge_t = expected_edge_t
-            
-        # The center to sample the symbol is halfway between the edges
-        center_t = cursor_edge_t - (current_sps_t / 2.0)
-        clock_centers.append(center_t)
-        
-        added_symbols += 1
-        
-    return True, np.array(clock_centers), manual_boundary
+    arr = np.asarray(data, dtype=np.float64)
+    n = len(arr)
 
-def remove_dc_bias(analog_data, thresholds):
-    # Centers the analog data around 0.0 using the middle threshold (CFO correction).
+    if window_len >= n:
+        lo = float(np.min(arr))
+        hi = float(np.max(arr))
+        span = hi - lo
+        if span <= 1e-12:
+            return np.zeros(n, dtype=np.float64)
+        out = 2.0 * (arr - lo) / span - 1.0
+        np.clip(out, -1.0, 1.0, out=out)
+        return out
 
-    if thresholds:
-        # Get the middle threshold as the DC bias
-        mid_idx = len(thresholds) // 2
-        dc_offset = thresholds[mid_idx]
-    else:
-        # Fallback to mean if no thresholds are set
-        dc_offset = np.mean(analog_data)
-        
-    centered_data = analog_data - dc_offset
-    adjusted_thresholds = [t - dc_offset for t in thresholds]
-    
-    return centered_data, adjusted_thresholds, dc_offset
+    step = max(1, window_len // 4)
+    windows = np.lib.stride_tricks.sliding_window_view(arr, window_len)[::step]
+    lo_vals = windows.min(axis=1)
+    hi_vals = windows.max(axis=1)
 
-def sample_and_slice(analog_data, timestamps, sr, thresholds):
-    #Samples analog data at specific timestamps and digitizes into integer symbols.
+    starts = np.arange(0, n - window_len + 1, step, dtype=np.float64)
+    half_span = (window_len - 1) / 2.0
+    centers = starts + half_span
 
-    # Convert timestamps to indices, safely clipped to array bounds
-    indices = np.clip(np.array(timestamps) * sr, 0, len(analog_data) - 1).astype(int)
-    
-    # Sample the continuous wave
-    analog_samples = analog_data[indices]
-    
-    # Slice based on thresholds
-    if not thresholds:
-        thresh = [0.0]
-    else:
-        thresh = thresholds
-        
-    return np.digitize(analog_samples, thresh)
+    # Ensure tail samples are anchored to a full-width window at the end
+    last_start = n - window_len
+    if int(starts[-1]) < last_start:
+        lo_vals = np.append(lo_vals, float(np.min(arr[last_start:])))
+        hi_vals = np.append(hi_vals, float(np.max(arr[last_start:])))
+        centers = np.append(centers, float(last_start) + half_span)
+
+    idx = np.arange(n, dtype=np.float64)
+    lo_env = np.interp(idx, centers, lo_vals)
+    hi_env = np.interp(idx, centers, hi_vals)
+
+    span = hi_env - lo_env
+    valid = span > 1e-12
+    out = np.zeros(n, dtype=np.float64)
+    out[valid] = 2.0 * (arr[valid] - lo_env[valid]) / span[valid] - 1.0
+    np.clip(out, -1.0, 1.0, out=out)
+    return out
+
+
