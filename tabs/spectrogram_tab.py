@@ -1,16 +1,18 @@
 import os
+import time
 import numpy as np
-from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
+from PyQt6.QtWidgets import (QApplication, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
                              QLineEdit, QPushButton, QFileDialog, QGroupBox, 
                              QGridLayout, QCheckBox, QSpinBox, QScrollArea,
                              QSizePolicy, QWidget, QSplitter)
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QEventLoop
 import pyqtgraph as pg
 
 # Import the base class from core.
 from core.base_tab import BaseSignalTab
-# Import dsp utilities.
+# Import dsp and IQ I/O utilities.
 import utils.dsp_lib as dsp
+import utils.iq_io_lib as iq_io
 
 # Horizontal split between Left (Visualization) and Right (Sidebar Controls)
 # Setting SIDEBAR_PANEL_STRETCH = 0 lets the sidebar sit at natural sizeHint width
@@ -36,6 +38,14 @@ DEBOUNCE_MS = 250
 # Extra time buffer ratio rendered on either side of the visible spectrogram window
 VIEW_BUFFER_RATIO = 0.00
 
+# Minimap anchor & burst sampling parameters
+MINIMAP_MIN_ANCHORS = 1000
+MINIMAP_MAX_ANCHORS = 2500
+MINIMAP_BURST_SAMPLES = 512
+
+# Minimum interval (seconds) between busy-status UI repaints
+PROGRESS_UPDATE_INTERVAL_S = 0.05
+
 class SpectrogramTab(BaseSignalTab):
     def __init__(self, context):
         super().__init__(context, "File IO and Spectrogram")
@@ -48,7 +58,17 @@ class SpectrogramTab(BaseSignalTab):
         
         self.local_iq_handle = None
         self.local_duration = 0
-        self.current_file_path = "" 
+        self.current_file_path = ""
+        self.minimap_t = None
+        self.minimap_rms = None
+        self.minimap_peak = None
+        self._is_busy = False
+        self._last_progress_time = 0.0
+
+        self.lbl_busy_status = QLabel("")
+        self.lbl_busy_status.setStyleSheet("color: #1565C0; font-weight: bold;")
+        self.lbl_busy_status.setMinimumWidth(230)
+        self.header_layout.insertWidget(0, self.lbl_busy_status)
 
         # Timer for debouncing heavy spectrogram FFT updates
         self.update_timer = QTimer()
@@ -127,6 +147,16 @@ class SpectrogramTab(BaseSignalTab):
         self.chk_sparse.setChecked(False)
         self.chk_sparse.stateChanged.connect(self.refresh_spectrogram)
         layout_mem.addWidget(self.chk_sparse)
+
+        row_minimap = QHBoxLayout()
+        row_minimap.addWidget(QLabel("Minimap:"))
+        self.cb_minimap_mode = QComboBox()
+        self.cb_minimap_mode.addItems(["RMS", "Peak"])
+        self.cb_minimap_mode.setCurrentText("RMS")
+        self.cb_minimap_mode.setToolTip("Switch instantly between cached RMS average and Peak amplitude envelopes.")
+        self.cb_minimap_mode.currentTextChanged.connect(self._render_minimap_curve)
+        row_minimap.addWidget(self.cb_minimap_mode, stretch=1)
+        layout_mem.addLayout(row_minimap)
 
         self.sidebar_layout.addWidget(grp_mem)
         
@@ -223,25 +253,60 @@ class SpectrogramTab(BaseSignalTab):
         if not self.current_file_path:
             self.lbl_file_info.setText("Error: No file selected")
             return
+        if self._is_busy:
+            return
+
+        self._is_busy = True
+        self.update_timer.stop()
+        has_app = QApplication.instance() is not None
+        if has_app:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
         try:
+            self._set_busy_status("Opening file...", force=True)
             sr_val = float(self.txt_sr.text())
-            
+            if sr_val <= 0.0:
+                raise ValueError("Sample rate must be > 0.")
+
             # Instantiate the wrapper instead of raw memmap
             fmt_str = self.cb_dtype.currentText()
-            self.local_iq_handle = dsp.MappedIQWrapper(self.current_file_path, fmt_str)
-            
+            new_handle = iq_io.MappedIQWrapper(self.current_file_path, fmt_str)
+
+            old_handle = self.local_iq_handle
+            if old_handle is not None and old_handle is not self.context.raw_iq_handle:
+                old_handle.close()
+            self.local_iq_handle = new_handle
+
             self.local_duration = len(self.local_iq_handle) / sr_val
-            
+
             self.lbl_file_info.setText(f"{len(self.local_iq_handle):,} Samples\n{self.local_duration:.4f} Sec")
             self.update_minimap()
-            self.region.setRegion([0, min(0.15, self.local_duration)])
-            self.refresh_spectrogram()
+
+            init_end = min(0.15, self.local_duration)
+            vb = self.plot_spec.getViewBox()
+            self.region.blockSignals(True)
+            self.plot_spec.blockSignals(True)
+            vb.blockSignals(True)
+            try:
+                self.region.setRegion([0, init_end])
+                self.plot_spec.setXRange(0, init_end, padding=0)
+            finally:
+                vb.blockSignals(False)
+                self.plot_spec.blockSignals(False)
+                self.region.blockSignals(False)
+
+            self.update_timer.stop()
+            self._refresh_spectrogram_impl()
             self.btn_stage.setEnabled(True)
             
         except Exception as e:
             self.lbl_file_info.setText(f"Error: {str(e)}")
             print(e)
+        finally:
+            self.lbl_busy_status.setText("")
+            if has_app:
+                QApplication.restoreOverrideCursor()
+            self._is_busy = False
 
     def load_input(self):
         return False, "Not Applicable"
@@ -268,16 +333,105 @@ class SpectrogramTab(BaseSignalTab):
         
         return True, f"Ready for Tuner ({self.context.raw_sr/1e6:.1f} MHz)"
 
+    def _render_minimap_curve(self):
+        if self.minimap_t is None or len(self.minimap_t) == 0:
+            self.curve_mini.setData([], [])
+            return
+        y_vals = self.minimap_peak if self.cb_minimap_mode.currentText() == "Peak" else self.minimap_rms
+        self.curve_mini.setData(self.minimap_t, y_vals)
+
+    def _set_busy_status(self, text, force=False):
+        now = time.monotonic()
+        if not force and (now - self._last_progress_time) < PROGRESS_UPDATE_INTERVAL_S:
+            return
+        self._last_progress_time = now
+        self.lbl_busy_status.setText(text)
+        self.lbl_busy_status.repaint()
+        if QApplication.instance() is not None:
+            QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _make_progress_cb(self, label):
+        last_pct = -1
+        def _cb(done, total):
+            nonlocal last_pct
+            if total <= 0:
+                return
+            pct = int((done * 100) / total)
+            is_done = done >= total
+            if pct == last_pct and not is_done:
+                return
+            now = time.monotonic()
+            if not is_done and (now - self._last_progress_time) < PROGRESS_UPDATE_INTERVAL_S:
+                return
+            last_pct = pct
+            self._set_busy_status(f"{label} {pct}%", force=True)
+        return _cb
+
     def update_minimap(self):
-        if self.local_iq_handle is None: return
-        step = max(1, len(self.local_iq_handle) // 5000)
-        data = np.abs(self.local_iq_handle[::step])
-        t = np.linspace(0, self.local_duration, len(data))
-        self.curve_mini.setData(t, data)
+        if self.local_iq_handle is None:
+            return
+        total_samples = len(self.local_iq_handle)
+        if total_samples == 0 or self.local_duration <= 0.0:
+            self.minimap_t = None
+            self.minimap_rms = None
+            self.minimap_peak = None
+            self._render_minimap_curve()
+            return
+
+        sr = total_samples / self.local_duration
+        num_anchors = max(MINIMAP_MIN_ANCHORS, min(int(self.plot_mini.width()), MINIMAP_MAX_ANCHORS))
+
+        if total_samples <= num_anchors * MINIMAP_BURST_SAMPLES:
+            self._set_busy_status("Scanning minimap...", force=True)
+            raw = self.local_iq_handle[:]
+            mag_sq = raw.real * raw.real + raw.imag * raw.imag
+            if total_samples <= num_anchors:
+                mag = np.sqrt(mag_sq)
+                self.minimap_rms = mag
+                self.minimap_peak = mag
+                self.minimap_t = np.linspace(0.0, self.local_duration, total_samples)
+            else:
+                edges = np.linspace(0, total_samples, num_anchors + 1, dtype=np.int64)
+                starts = edges[:-1]
+                counts = np.diff(edges)
+                self.minimap_rms = np.sqrt(np.add.reduceat(mag_sq, starts) / counts)
+                self.minimap_peak = np.sqrt(np.maximum.reduceat(mag_sq, starts))
+                self.minimap_t = ((edges[:-1] + edges[1:]) * 0.5) / sr
+        else:
+            starts = np.linspace(0, total_samples - MINIMAP_BURST_SAMPLES, num_anchors, dtype=np.int64)
+            starts = (starts // MINIMAP_BURST_SAMPLES) * MINIMAP_BURST_SAMPLES
+            self._set_busy_status("Scanning minimap... 0%", force=True)
+            chunks = self.local_iq_handle.read_sparse_chunks(
+                starts,
+                MINIMAP_BURST_SAMPLES,
+                progress_cb=self._make_progress_cb("Scanning minimap..."),
+            )
+            mag_sq = chunks.real * chunks.real + chunks.imag * chunks.imag
+            self.minimap_rms = np.sqrt(mag_sq.mean(axis=1))
+            self.minimap_peak = np.sqrt(mag_sq.max(axis=1))
+            self.minimap_t = (starts + MINIMAP_BURST_SAMPLES / 2.0) / sr
+
+        self._render_minimap_curve()
         self.plot_mini.setXRange(0, self.local_duration)
         self.region.setBounds([0, self.local_duration])
 
     def refresh_spectrogram(self):
+        if self.local_iq_handle is None or self._is_busy:
+            return
+        self._is_busy = True
+        self.update_timer.stop()
+        has_app = QApplication.instance() is not None
+        if has_app:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self._refresh_spectrogram_impl()
+        finally:
+            self.lbl_busy_status.setText("")
+            if has_app:
+                QApplication.restoreOverrideCursor()
+            self._is_busy = False
+
+    def _refresh_spectrogram_impl(self):
         if self.local_iq_handle is None: return
         min_t, max_t = self.region.getRegion()
         sr = float(self.txt_sr.text())
@@ -307,9 +461,12 @@ class SpectrogramTab(BaseSignalTab):
         if req_samples <= max_samples:
             # We are within limit.
             # Load contiguous chunk normally.
+            self._set_busy_status("Reading IQ data...", force=True)
             data = self.local_iq_handle[i_start:i_stop]
+            self._set_busy_status("Computing spectrogram...", force=True)
             sxx, extent = dsp.compute_spectrogram(data, sr, fft_size, overlap)
             
+            self._set_busy_status("Rendering spectrogram...", force=True)
             self.img_spec.setImage(sxx.T, autoLevels=False)
             self.img_spec.setRect(pg.QtCore.QRectF(min_t, extent[2], (max_t-min_t), extent[3]-extent[2]))
             
@@ -317,29 +474,35 @@ class SpectrogramTab(BaseSignalTab):
             # Over limit
             # Clamp the read to the max allowed samples.
             limit_stop = i_start + max_samples
+            self._set_busy_status("Reading IQ data...", force=True)
             data = self.local_iq_handle[i_start:limit_stop]
+            self._set_busy_status("Computing spectrogram...", force=True)
             sxx, extent = dsp.compute_spectrogram(data, sr, fft_size, overlap)
             
             # Calculate actual duration of loaded data.
             actual_dur = (limit_stop - i_start) / sr
             
             # Set image rect. It will appear cut off on the screen (shorter than the view range).
+            self._set_busy_status("Rendering spectrogram...", force=True)
             self.img_spec.setImage(sxx.T, autoLevels=False)
             self.img_spec.setRect(pg.QtCore.QRectF(min_t, extent[2], actual_dur, extent[3]-extent[2]))
             
         else:
             # Over Limit but mosaic is checked.
             # Use DSP library function.
+            self._set_busy_status("Computing spectrogram... 0%", force=True)
             sxx, extent = dsp.compute_mosaic_spectrogram(
                 self.local_iq_handle, 
                 sr, 
                 i_start, 
                 i_stop, 
                 fft_size, 
-                target_width=2000
+                target_width=2000,
+                progress_cb=self._make_progress_cb("Computing spectrogram...")
             )
             
             if sxx is not None:
+                self._set_busy_status("Rendering spectrogram...", force=True)
                 self.img_spec.setImage(sxx.T, autoLevels=False)
                 # Extent from dsp_lib is [0, dur, min_f, max_f]
                 # Map to global time (min_t)

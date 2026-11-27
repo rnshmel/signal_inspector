@@ -39,7 +39,10 @@ class DemodTab(BaseSignalTab):
         self.local_filtered_sr = 1.0
         
         self.raw_demod_result = None
+        self.filtered_demod_result = None
         self.demod_result = None
+        self.norm_applied = False
+        self.norm_window_len = 0
         
         self.thresh_lines = []
         self.digital_color_name = 'Orange'
@@ -125,6 +128,17 @@ class DemodTab(BaseSignalTab):
         self.filter_region.hide()
         self.filter_region.sigRegionChanged.connect(self.update_filter_label)
         self.plot_main.addItem(self.filter_region)
+
+        # Normalization window box.
+        self.norm_region = pg.LinearRegionItem(
+            brush=pg.mkBrush(0, 200, 255, 45),
+            pen=pg.mkPen('#00E5FF', width=2),
+            hoverPen=pg.mkPen('#80F0FF', width=4),
+        )
+        self.norm_region.setZValue(11)
+        self.norm_region.hide()
+        self.norm_region.sigRegionChanged.connect(self.update_norm_label)
+        self.plot_main.addItem(self.norm_region)
         
         self.viz_layout.addWidget(self.plot_main, stretch=MAIN_PLOT_STRETCH)
         
@@ -192,6 +206,48 @@ class DemodTab(BaseSignalTab):
         self.filter_layout.addWidget(self.btn_apply_filter)
         
         self.sidebar_layout.addWidget(self.grp_filter)
+
+        self.btn_advanced = QPushButton("Advanced \u25B8")
+        self.btn_advanced.setCheckable(True)
+        self.btn_advanced.setChecked(False)
+        self.btn_advanced.setStyleSheet("QPushButton { text-align: left; padding: 3px 6px; }")
+        self.btn_advanced.toggled.connect(self.toggle_advanced_section)
+        self.sidebar_layout.addWidget(self.btn_advanced)
+
+        self.advanced_container = QWidget()
+        self.advanced_container.setVisible(False)
+        adv_layout = QVBoxLayout(self.advanced_container)
+        adv_layout.setContentsMargins(0, 0, 0, 0)
+        adv_layout.setSpacing(4)
+
+        self.grp_norm = QGroupBox("Sliding Normalization")
+        norm_layout = QVBoxLayout(self.grp_norm)
+
+        self.chk_norm_box = QCheckBox("Show Norm Window Box")
+        self.chk_norm_box.stateChanged.connect(self.toggle_norm_box)
+        norm_layout.addWidget(self.chk_norm_box)
+
+        self.lbl_norm_len = QLabel("Length: -- samples")
+        norm_layout.addWidget(self.lbl_norm_len)
+
+        row_norm_btns = QHBoxLayout()
+        self.btn_apply_norm = QPushButton("Normalize")
+        self.btn_apply_norm.clicked.connect(self.apply_normalization)
+        row_norm_btns.addWidget(self.btn_apply_norm)
+
+        self.btn_reset_norm = QPushButton("Reset")
+        self.btn_reset_norm.setEnabled(False)
+        self.btn_reset_norm.clicked.connect(self.reset_normalization)
+        row_norm_btns.addWidget(self.btn_reset_norm)
+        norm_layout.addLayout(row_norm_btns)
+
+        self.lbl_norm_status = QLabel("")
+        self.lbl_norm_status.setStyleSheet("color: #00838F; font-size: 9pt; font-weight: bold;")
+        self.lbl_norm_status.setVisible(False)
+        norm_layout.addWidget(self.lbl_norm_status)
+
+        adv_layout.addWidget(self.grp_norm)
+        self.sidebar_layout.addWidget(self.advanced_container)
 
         # View Settings.
         self.grp_view = QGroupBox("View Settings")
@@ -293,8 +349,11 @@ class DemodTab(BaseSignalTab):
         
         # Reset Demod and Filter state on new load.
         self.raw_demod_result = None
+        self.filtered_demod_result = None
         self.demod_result = None
         self.chk_filter_box.setChecked(False)
+        self.chk_norm_box.setChecked(False)
+        self._set_norm_state(False, 0)
         
         self.plot_main.setTitle("Data Loaded. Select Mode and click RUN.")
         self.btn_run.setEnabled(True)
@@ -356,14 +415,13 @@ class DemodTab(BaseSignalTab):
             self.plot_main.setLabel('left', 'Phase Mag', units='rad')
             
         # Default active array is the raw array.
-        self.demod_result = self.raw_demod_result.copy()
-            
+        self.filtered_demod_result = self.raw_demod_result.copy()
+        self.demod_result = self.filtered_demod_result.copy()
+        self._set_norm_state(False, 0)
+
         # Update minimap. Peak decimate for pure speed on the mini overview.
-        mini_step = max(1, len(self.demod_result) // 5000)
-        mini_y = self.demod_result[::mini_step]
-        mini_x = np.arange(len(mini_y)) * (mini_step / sr)
-        self.curve_mini.setData(mini_x, mini_y)
-        
+        self._update_minimap()
+
         # Reset navigation region.
         duration = len(self.demod_result) / sr
         self.plot_mini.setXRange(0, duration) 
@@ -378,10 +436,12 @@ class DemodTab(BaseSignalTab):
         
         self.autoscale_view()
         
-        # Reset filter region size to a sensible default.
+        # Reset filter and norm region sizes to a sensible default.
         box_width = max(0.0001, (end_t - start_t) * 0.05)
         self.filter_region.setRegion([start_t + box_width, start_t + (box_width * 2)])
         self.update_filter_label()
+        self.norm_region.setRegion([start_t + box_width, start_t + (box_width * 2)])
+        self.update_norm_label()
         
         # Re-apply slicer if enabled.
         if self.chk_slicer.isChecked():
@@ -518,45 +578,129 @@ class DemodTab(BaseSignalTab):
 
         self.curve_digital.setData(view_x, mapped_y)
 
-    def toggle_filter_box(self, checked):
+    def _update_minimap(self):
+        if self.demod_result is None or len(self.demod_result) == 0:
+            self.curve_mini.setData([], [])
+            return
+        sr = self.local_filtered_sr
+        mini_step = max(1, len(self.demod_result) // 5000)
+        mini_y = self.demod_result[::mini_step]
+        mini_x = np.arange(len(mini_y)) * (mini_step / sr)
+        self.curve_mini.setData(mini_x, mini_y)
+
+    def _toggle_window_box(self, region, checked, update_label_fn):
         if checked:
             view_range = self.plot_main.viewRange()[0]
             min_x, max_x = view_range[0], view_range[1]
             view_width = max_x - min_x
-            
+
             box_width = view_width * 0.20
             center_x = min_x + (view_width / 2.0)
-            self.filter_region.setRegion([center_x - (box_width / 2.0), center_x + (box_width / 2.0)])
-            
-            self.filter_region.show()
-            self.update_filter_label()
+            region.setRegion([center_x - (box_width / 2.0), center_x + (box_width / 2.0)])
+
+            region.show()
+            update_label_fn()
         else:
-            self.filter_region.hide()
+            region.hide()
+
+    def _update_window_label(self, region, label):
+        if not region.isVisible():
+            return
+        min_x, max_x = region.getRegion()
+        length_samples = int(abs(max_x - min_x) * self.local_filtered_sr)
+        label.setText(f"Length: {length_samples} samples")
+
+    def toggle_filter_box(self, checked):
+        self._toggle_window_box(self.filter_region, checked, self.update_filter_label)
 
     def update_filter_label(self):
-        if not self.filter_region.isVisible():
-            return
-        min_x, max_x = self.filter_region.getRegion()
-        # Time width in seconds * sample rate = length in samples
-        length_samples = int(abs(max_x - min_x) * self.local_filtered_sr)
-        self.lbl_filter_len.setText(f"Length: {length_samples} samples")
+        self._update_window_label(self.filter_region, self.lbl_filter_len)
 
     def apply_filter(self):
         if self.raw_demod_result is None:
             return
-            
+
         min_x, max_x = self.filter_region.getRegion()
         length_samples = int(abs(max_x - min_x) * self.local_filtered_sr)
-        
+
         # If the box is too small (or user wants to quickly revert).
         if length_samples < 2:
-            self.demod_result = self.raw_demod_result.copy()
+            self.filtered_demod_result = self.raw_demod_result.copy()
         else:
             f_type = self.cb_filter.currentText()
             # Apply filter strictly to the RAW data to avoid compound filtering.
-            self.demod_result = dsp.apply_matched_filter(self.raw_demod_result, f_type, length_samples)
-            
+            self.filtered_demod_result = dsp.apply_matched_filter(self.raw_demod_result, f_type, length_samples)
+
+        if self.norm_applied and self.norm_window_len >= 2:
+            self.demod_result = dsp.apply_sliding_normalization(
+                self.filtered_demod_result, self.norm_window_len
+            )
+        else:
+            self.demod_result = self.filtered_demod_result.copy()
+
+        self._update_minimap()
         self.refresh_plot_data()
+
+    def toggle_advanced_section(self, checked):
+        self.advanced_container.setVisible(checked)
+        self._update_advanced_button_text()
+
+    def _update_advanced_button_text(self):
+        if self.btn_advanced.isChecked():
+            self.btn_advanced.setText("Advanced \u25BE")
+        elif self.norm_applied:
+            self.btn_advanced.setText("Advanced \u25B8 (Normalized)")
+        else:
+            self.btn_advanced.setText("Advanced \u25B8")
+
+    def _set_norm_state(self, applied, window_len=0):
+        self.norm_applied = bool(applied)
+        self.norm_window_len = int(window_len) if applied else 0
+        self.btn_reset_norm.setEnabled(self.norm_applied)
+        if self.norm_applied:
+            self.lbl_norm_status.setText(f"Active (W: {self.norm_window_len:,})")
+            self.lbl_norm_status.setVisible(True)
+        else:
+            self.lbl_norm_status.setText("")
+            self.lbl_norm_status.setVisible(False)
+        self._update_advanced_button_text()
+
+    def _refresh_after_norm_change(self):
+        self._update_minimap()
+        self.autoscale_view()
+        if self.chk_slicer.isChecked():
+            self.setup_thresholds()
+        self.refresh_plot_data()
+
+    def toggle_norm_box(self, checked):
+        self._toggle_window_box(self.norm_region, checked, self.update_norm_label)
+
+    def update_norm_label(self):
+        self._update_window_label(self.norm_region, self.lbl_norm_len)
+
+    def apply_normalization(self):
+        if self.filtered_demod_result is None:
+            return
+
+        min_x, max_x = self.norm_region.getRegion()
+        length_samples = int(abs(max_x - min_x) * self.local_filtered_sr)
+        if length_samples < 2:
+            self.reset_normalization()
+            return
+
+        self.demod_result = dsp.apply_sliding_normalization(
+            self.filtered_demod_result, length_samples
+        )
+        self._set_norm_state(True, length_samples)
+        self._refresh_after_norm_change()
+
+    def reset_normalization(self):
+        if self.filtered_demod_result is None:
+            return
+
+        self.demod_result = self.filtered_demod_result.copy()
+        self._set_norm_state(False, 0)
+        self._refresh_after_norm_change()
 
     def get_adaptive_color(self, name):
         # Returns hex color tuple (dark_mode_hex, light_mode_hex).
@@ -604,6 +748,9 @@ class DemodTab(BaseSignalTab):
             self.apply_opaque_grid('#d8d8d8')
             self.curve_main.setPen(pg.mkPen('#006400', width=ANALOG_PEN_WIDTH))
             self.filter_region.setBrush(pg.mkBrush(0, 0, 0, 50))
+            self.norm_region.setBrush(pg.mkBrush(0, 131, 143, 45))
+            for line in self.norm_region.lines:
+                line.setPen(pg.mkPen('#00838F', width=2))
         else:
             self.plot_main.setBackground('#1e1e1e')
             self.plot_main.getAxis('left').setPen('w')
@@ -613,6 +760,9 @@ class DemodTab(BaseSignalTab):
             self.apply_opaque_grid('#383838')
             self.curve_main.setPen(pg.mkPen('g', width=ANALOG_PEN_WIDTH))
             self.filter_region.setBrush(pg.mkBrush(255, 255, 255, 50))
+            self.norm_region.setBrush(pg.mkBrush(0, 200, 255, 45))
+            for line in self.norm_region.lines:
+                line.setPen(pg.mkPen('#00E5FF', width=2))
         
         self.update_digital_color(self.digital_color_name)
 

@@ -1,5 +1,5 @@
 import numpy as np
-from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QLabel, QComboBox, 
+from PyQt6.QtWidgets import (QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QComboBox, 
                              QPushButton, QGroupBox, QCheckBox,
                              QSpinBox, QDoubleSpinBox, QScrollArea,
                              QSizePolicy, QWidget, QSplitter)
@@ -8,8 +8,8 @@ import pyqtgraph as pg
 
 # Import the base class.
 from core.base_tab import BaseSignalTab
-# Import dsp utilities.
-import utils.dsp_lib as dsp
+# Import clock recovery and slicing utilities.
+import utils.clock_recovery_lib as clk
 
 # Horizontal split between Left (Visualization) and Right (Sidebar Controls)
 # Setting SIDEBAR_PANEL_STRETCH = 0 lets the sidebar sit at natural sizeHint width
@@ -32,7 +32,14 @@ TRACE_PEN_WIDTH = 3
 # Maximum number of symbols allowed in the viewport once Auto-Sync is active
 # (or when manual symbol count reaches this threshold) to prevent zoom-out lag
 # plotting all the vertical semi-translucent lines is a performance sink 
-MAX_VISIBLE_SYMBOLS = 256
+MAX_VISIBLE_SYMBOLS = 1024
+MAX_OVERLAY_ITEMS = 1500
+
+DEFAULT_ALPHA = 0.30
+DEFAULT_BETA = 0.05   # None = Auto (alpha / 10); set a float to override Auto
+DEFAULT_GAMMA = 0.05  # None = Auto (beta / 10); set a float to override Auto
+PLL_MODE_2ND = "2nd-Order PLL (Default)"
+PLL_MODE_3RD = "3rd-Order PLL (CFO Tracking)"
 
 class SlicerTab(BaseSignalTab):
     def __init__(self, context):
@@ -49,6 +56,7 @@ class SlicerTab(BaseSignalTab):
         # Auto-Sync State
         self.auto_clock_centers = None
         self.auto_clock_edges = None
+        self.auto_zc_thresholds = None
         
         # Visual items.
         self.tick_lines = []
@@ -82,12 +90,23 @@ class SlicerTab(BaseSignalTab):
         
         self.pen_digital = pg.mkPen('#FFA500', width=TRACE_PEN_WIDTH)
         self.curve_digital = self.plot_main.plot(pen=self.pen_digital, dynamicRangeLimit=None) 
+        self.curve_digital.setZValue(10)
         
         # Zero-Line Reference
         self.zero_line = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen('#555555', width=1, style=Qt.PenStyle.DashLine))
+        self.zero_line.setZValue(20)
         self.plot_main.addItem(self.zero_line)
+
+        # Tracked ZC & Multi-Level Threshold Overlays
+        self.zc_outer_curve = self.plot_main.plot(
+            pen=pg.mkPen('#18FFFF', width=1.5, style=Qt.PenStyle.DashLine)
+        )
+        self.zc_outer_curve.setZValue(34)
+
+        self.zc_curve = self.plot_main.plot(pen=pg.mkPen('#18FFFF', width=2.5))
+        self.zc_curve.setZValue(35)
         
-        # Clock Region (The interactive manual box).
+        # Clock Region (that interactive manual box)
         self.clock_region = pg.LinearRegionItem(brush=pg.mkBrush(255, 255, 255, 30))
         self.clock_region.setZValue(100)
         for line in self.clock_region.lines:
@@ -100,10 +119,21 @@ class SlicerTab(BaseSignalTab):
         self.clock_region.sigRegionChanged.connect(self.on_clock_region_changed)
         self.plot_main.addItem(self.clock_region)
         
-        # Auto-Sync Boundary Line (Red Solid)
+        # Auto-Sync Boundary Line (red line)
         self.auto_start_line = pg.InfiniteLine(angle=90, pen=pg.mkPen('r', width=3))
+        self.auto_start_line.setZValue(40)
         self.auto_start_line.setVisible(False)
         self.plot_main.addItem(self.auto_start_line)
+
+        # Sampling Point Markers
+        self.sample_points = pg.ScatterPlotItem(
+            size=9,
+            symbol='o',
+            pen=pg.mkPen('#111111', width=1.5),
+            brush=pg.mkBrush('#00E676')
+        )
+        self.sample_points.setZValue(50)
+        self.plot_main.addItem(self.sample_points)
         
         # Stop line (limit for auto sync).
         self.stop_line = pg.InfiniteLine(
@@ -111,6 +141,7 @@ class SlicerTab(BaseSignalTab):
             pen=pg.mkPen('#FF00FF', width=3, style=Qt.PenStyle.DashLine),
             label='STOP LIMIT', labelOpts={'position': 0.95, 'color': '#FF00FF'}
         )
+        self.stop_line.setZValue(80)
         self.stop_line.setVisible(False) 
         self.plot_main.addItem(self.stop_line)
         
@@ -263,15 +294,122 @@ class SlicerTab(BaseSignalTab):
         row_tol = QHBoxLayout()
         row_tol.addWidget(QLabel("Loop Gain (\u03B1):"))
         self.spin_alpha = QDoubleSpinBox()
-        self.spin_alpha.setRange(0.01, 0.99)
-        self.spin_alpha.setValue(0.25) 
-        self.spin_alpha.setSingleStep(0.05)
+        self.spin_alpha.setRange(0.001, 0.99)
+        self.spin_alpha.setDecimals(4)
+        self.spin_alpha.setSingleStep(0.01)
+        self.spin_alpha.setValue(DEFAULT_ALPHA)
+        self.spin_alpha.valueChanged.connect(self.on_alpha_changed)
         row_tol.addWidget(self.spin_alpha)
         self.auto_layout.addLayout(row_tol)
         
         self.chk_stop_limit = QCheckBox("Set Stop Marker")
         self.chk_stop_limit.stateChanged.connect(self.toggle_stop_line)
         self.auto_layout.addWidget(self.chk_stop_limit)
+
+        self.btn_advanced = QPushButton("Advanced \u25B8")
+        self.btn_advanced.setCheckable(True)
+        self.btn_advanced.setChecked(False)
+        self.btn_advanced.setStyleSheet("QPushButton { text-align: left; padding: 3px 6px; }")
+        self.btn_advanced.toggled.connect(self.toggle_advanced_section)
+        self.auto_layout.addWidget(self.btn_advanced)
+
+        self.advanced_container = QWidget()
+        self.advanced_container.setVisible(False)
+        adv_layout = QVBoxLayout(self.advanced_container)
+        adv_layout.setContentsMargins(6, 4, 2, 4)
+        adv_layout.setSpacing(4)
+
+        row_order = QHBoxLayout()
+        row_order.addWidget(QLabel("Order:"))
+        self.cb_pll_order = QComboBox()
+        self.cb_pll_order.addItems([PLL_MODE_2ND, PLL_MODE_3RD])
+        self.cb_pll_order.currentIndexChanged.connect(self.on_pll_order_changed)
+        row_order.addWidget(self.cb_pll_order, stretch=1)
+        adv_layout.addLayout(row_order)
+
+        gains_grid = QGridLayout()
+        gains_grid.setContentsMargins(0, 0, 0, 0)
+        gains_grid.setHorizontalSpacing(4)
+        gains_grid.setVerticalSpacing(4)
+
+        init_beta = (DEFAULT_ALPHA / 10.0) if DEFAULT_BETA is None else float(DEFAULT_BETA)
+        init_gamma = (init_beta / 10.0) if DEFAULT_GAMMA is None else float(DEFAULT_GAMMA)
+
+        gains_grid.addWidget(QLabel("Freq (\u03B2):"), 0, 0)
+        self.spin_beta = QDoubleSpinBox()
+        self.spin_beta.setRange(0.0, 0.99)
+        self.spin_beta.setDecimals(5)
+        self.spin_beta.setSingleStep(0.001)
+        self.spin_beta.setValue(init_beta)
+        self.spin_beta.setEnabled(DEFAULT_BETA is not None)
+        self.spin_beta.valueChanged.connect(self.on_beta_changed)
+        gains_grid.addWidget(self.spin_beta, 0, 1)
+
+        self.chk_auto_beta = QCheckBox("Auto")
+        self.chk_auto_beta.setChecked(DEFAULT_BETA is None)
+        self.chk_auto_beta.setToolTip("Auto-calculate \u03B2 = \u03B1 / 10")
+        self.chk_auto_beta.stateChanged.connect(self.on_auto_beta_toggled)
+        gains_grid.addWidget(self.chk_auto_beta, 0, 2)
+
+        gains_grid.addWidget(QLabel("CFO (\u03B3):"), 1, 0)
+        self.spin_gamma = QDoubleSpinBox()
+        self.spin_gamma.setRange(0.0, 0.99)
+        self.spin_gamma.setDecimals(6)
+        self.spin_gamma.setSingleStep(0.0005)
+        self.spin_gamma.setValue(init_gamma)
+        self.spin_gamma.setEnabled(False)
+        gains_grid.addWidget(self.spin_gamma, 1, 1)
+
+        self.chk_auto_gamma = QCheckBox("Auto")
+        self.chk_auto_gamma.setChecked(DEFAULT_GAMMA is None)
+        self.chk_auto_gamma.setEnabled(False)
+        self.chk_auto_gamma.setToolTip("Auto-calculate \u03B3 = \u03B2 / 10")
+        self.chk_auto_gamma.stateChanged.connect(self.on_auto_gamma_toggled)
+        gains_grid.addWidget(self.chk_auto_gamma, 1, 2)
+
+        adv_layout.addLayout(gains_grid)
+
+        self.chk_outlier_rejection = QCheckBox("Outlier Rejection (Edge Penalty)")
+        self.chk_outlier_rejection.setChecked(True)
+        self.chk_outlier_rejection.setToolTip(
+            "Taper loop gains linearly to 0 toward +/-0.5 symbol edges. "
+            "Uncheck for full gain across the whole window."
+        )
+        adv_layout.addWidget(self.chk_outlier_rejection)
+
+        row_clamp = QHBoxLayout()
+        self.chk_freq_clamp = QCheckBox("Clamp Freq (\u00B1%)")
+        self.chk_freq_clamp.setChecked(False)
+        self.chk_freq_clamp.setToolTip("Clamp recovered symbol rate within +/-% of the seed box rate.")
+        self.chk_freq_clamp.stateChanged.connect(self.on_freq_clamp_toggled)
+        row_clamp.addWidget(self.chk_freq_clamp)
+
+        self.spin_freq_clamp = QDoubleSpinBox()
+        self.spin_freq_clamp.setRange(1.0, 95.0)
+        self.spin_freq_clamp.setDecimals(1)
+        self.spin_freq_clamp.setSingleStep(5.0)
+        self.spin_freq_clamp.setValue(25.0)
+        self.spin_freq_clamp.setSuffix("%")
+        self.spin_freq_clamp.setEnabled(False)
+        row_clamp.addWidget(self.spin_freq_clamp)
+        adv_layout.addLayout(row_clamp)
+
+        self.chk_show_zc = QCheckBox("Show ZC Threshold")
+        self.chk_show_zc.setChecked(False)
+        self.chk_show_zc.stateChanged.connect(self.on_overlay_toggles_changed)
+        adv_layout.addWidget(self.chk_show_zc)
+
+        self.chk_show_samples = QCheckBox("Show Sampling Points")
+        self.chk_show_samples.setChecked(False)
+        self.chk_show_samples.stateChanged.connect(self.on_overlay_toggles_changed)
+        adv_layout.addWidget(self.chk_show_samples)
+
+        self.chk_show_bounds = QCheckBox("Show Symbol Bounds")
+        self.chk_show_bounds.setChecked(True)
+        self.chk_show_bounds.stateChanged.connect(self.update_clock_ticks)
+        adv_layout.addWidget(self.chk_show_bounds)
+
+        self.auto_layout.addWidget(self.advanced_container)
         
         row_auto_btns = QHBoxLayout()
         self.btn_auto_sync = QPushButton("Auto-Sync")
@@ -301,6 +439,11 @@ class SlicerTab(BaseSignalTab):
         self.lbl_sps_metric.setStyleSheet("color: #0277BD; font-size: 14pt; font-weight: bold;")
         self.lbl_sps_metric.setVisible(False)
         self.auto_layout.addWidget(self.lbl_sps_metric)
+
+        self.lbl_zc_metric = QLabel("")
+        self.lbl_zc_metric.setStyleSheet("color: #00838F; font-size: 9.5pt; font-weight: bold;")
+        self.lbl_zc_metric.setVisible(False)
+        self.auto_layout.addWidget(self.lbl_zc_metric)
         
         self.sidebar_layout.addWidget(self.grp_auto)
         
@@ -340,13 +483,13 @@ class SlicerTab(BaseSignalTab):
         self.local_sr = self.context.demod_sr
         
         # CFO
-        self.centered_analog_data, self.adjusted_thresholds, _ = dsp.remove_dc_bias(
+        self.centered_analog_data, self.adjusted_thresholds, _ = clk.remove_dc_bias(
             self.context.demod_signal, 
             self.context.thresholds
         )
         
         # Reset Auto-Sync state
-        self.clear_auto_sync()
+        self.clear_auto_sync(refresh=False)
         
         # Restore color preference.
         user_color = self.context.viz_trace_color
@@ -418,6 +561,7 @@ class SlicerTab(BaseSignalTab):
             self.autoscale_view()
         self.update_main_plot()
         self.update_clock_ticks()
+        self.update_clock_overlays()
 
     def update_main_plot(self):
         if self.centered_analog_data is None: return
@@ -496,20 +640,23 @@ class SlicerTab(BaseSignalTab):
         
         # If Auto-Sync is locked, use its combined timestamps exactly
         if self.auto_clock_centers is not None:
-            timestamps = self.auto_clock_centers.tolist()
+            timestamps = self.auto_clock_centers
+            zc_offsets = self.auto_zc_thresholds
         else:
             # Otherwise, calculate timestamps manually from the box
             min_t, max_t = self.clock_region.getRegion()
             num_symbols = self.spin_symbols.value()
             sym_width = (max_t - min_t) / num_symbols
             timestamps = [min_t + (sym_width * (i + 0.5)) for i in range(num_symbols)]
+            zc_offsets = None
             
-        # Sample and digitize via DSP lib
-        self.symbol_buffer = dsp.sample_and_slice(
+        # Sample and digitize via clock recovery lib
+        self.symbol_buffer = clk.sample_and_slice(
             self.centered_analog_data, 
             timestamps, 
             sr, 
-            self.adjusted_thresholds
+            self.adjusted_thresholds,
+            zc_offsets=zc_offsets,
         )
 
     def update_clock_box_size(self):
@@ -542,6 +689,13 @@ class SlicerTab(BaseSignalTab):
         # Draws the vertical clock lines based on Manual + Auto states.
         if self.centered_analog_data is None: return
         
+        # Clear old lines.
+        while len(self.tick_lines) > 0:
+            self.plot_main.removeItem(self.tick_lines.pop())
+
+        if not self.chk_show_bounds.isChecked():
+            return
+
         # Combine edges to draw.
         if self.auto_clock_edges is not None:
             edges_to_draw = self.auto_clock_edges
@@ -554,11 +708,7 @@ class SlicerTab(BaseSignalTab):
             else:
                 edges_to_draw = []
             
-        # Clear old lines.
-        while len(self.tick_lines) > 0:
-            self.plot_main.removeItem(self.tick_lines.pop())
-            
-        if not edges_to_draw: return
+        if edges_to_draw is None or len(edges_to_draw) == 0: return
         
         tick_pen = pg.mkPen('#FF5555', style=Qt.PenStyle.DashLine, width=2)
         view_min, view_max = self.plot_main.viewRange()[0]
@@ -574,13 +724,208 @@ class SlicerTab(BaseSignalTab):
         
         # Max lines on screen check to protect UI thread
         if len(visible_edges) > MAX_VISIBLE_SYMBOLS:
-            visible_edges = visible_edges[::len(visible_edges)//MAX_VISIBLE_SYMBOLS]
+            step = (len(visible_edges) + MAX_VISIBLE_SYMBOLS - 1) // MAX_VISIBLE_SYMBOLS
+            visible_edges = visible_edges[::step]
             
         for x_pos in visible_edges:
             l = pg.InfiniteLine(angle=90, movable=False, pen=tick_pen)
+            l.setZValue(5)
             l.setValue(x_pos)
             self.plot_main.addItem(l)
             self.tick_lines.append(l)
+
+    def toggle_advanced_section(self, checked):
+        self.advanced_container.setVisible(checked)
+        self._update_advanced_button_text()
+
+    def _update_advanced_button_text(self):
+        if self.btn_advanced.isChecked():
+            self.btn_advanced.setText("Advanced \u25BE")
+        elif self.cb_pll_order.currentText() == PLL_MODE_3RD:
+            self.btn_advanced.setText("Advanced \u25B8 (3rd-Order)")
+        else:
+            self.btn_advanced.setText("Advanced \u25B8")
+
+    def _set_pll_controls_enabled(self, enabled):
+        is_unlocked = bool(enabled)
+        is_3rd = self.cb_pll_order.currentText() == PLL_MODE_3RD
+        self.spin_alpha.setEnabled(is_unlocked)
+        self.chk_stop_limit.setEnabled(is_unlocked)
+        self.stop_line.setMovable(is_unlocked)
+        self.cb_pll_order.setEnabled(is_unlocked)
+        self.chk_auto_beta.setEnabled(is_unlocked)
+        self.spin_beta.setEnabled(is_unlocked and not self.chk_auto_beta.isChecked())
+        self.chk_auto_gamma.setEnabled(is_unlocked and is_3rd)
+        self.spin_gamma.setEnabled(is_unlocked and is_3rd and not self.chk_auto_gamma.isChecked())
+        self.chk_outlier_rejection.setEnabled(is_unlocked)
+        self.chk_freq_clamp.setEnabled(is_unlocked)
+        self.spin_freq_clamp.setEnabled(is_unlocked and self.chk_freq_clamp.isChecked())
+
+    def on_alpha_changed(self, alpha_val):
+        if self.chk_auto_beta.isChecked():
+            self.spin_beta.blockSignals(True)
+            self.spin_beta.setValue(alpha_val / 10.0)
+            self.spin_beta.blockSignals(False)
+        if self.chk_auto_gamma.isChecked():
+            self.spin_gamma.blockSignals(True)
+            self.spin_gamma.setValue(self.spin_beta.value() / 10.0)
+            self.spin_gamma.blockSignals(False)
+
+    def on_beta_changed(self, beta_val):
+        if self.chk_auto_gamma.isChecked():
+            self.spin_gamma.blockSignals(True)
+            self.spin_gamma.setValue(beta_val / 10.0)
+            self.spin_gamma.blockSignals(False)
+
+    def on_auto_beta_toggled(self):
+        is_auto = self.chk_auto_beta.isChecked()
+        is_unlocked = self.auto_clock_centers is None
+        self.spin_beta.setEnabled(is_unlocked and not is_auto)
+        if is_auto:
+            self.spin_beta.blockSignals(True)
+            self.spin_beta.setValue(self.spin_alpha.value() / 10.0)
+            self.spin_beta.blockSignals(False)
+            if self.chk_auto_gamma.isChecked():
+                self.spin_gamma.blockSignals(True)
+                self.spin_gamma.setValue(self.spin_beta.value() / 10.0)
+                self.spin_gamma.blockSignals(False)
+
+    def on_auto_gamma_toggled(self):
+        is_3rd = self.cb_pll_order.currentText() == PLL_MODE_3RD
+        is_auto = self.chk_auto_gamma.isChecked()
+        is_unlocked = self.auto_clock_centers is None
+        self.spin_gamma.setEnabled(is_unlocked and is_3rd and not is_auto)
+        if is_auto:
+            self.spin_gamma.blockSignals(True)
+            self.spin_gamma.setValue(self.spin_beta.value() / 10.0)
+            self.spin_gamma.blockSignals(False)
+
+    def on_pll_order_changed(self):
+        is_3rd = self.cb_pll_order.currentText() == PLL_MODE_3RD
+        is_unlocked = self.auto_clock_centers is None
+        self.chk_auto_gamma.setEnabled(is_unlocked and is_3rd)
+        self.spin_gamma.setEnabled(is_unlocked and is_3rd and not self.chk_auto_gamma.isChecked())
+        self._update_advanced_button_text()
+
+    def on_freq_clamp_toggled(self):
+        is_unlocked = self.auto_clock_centers is None
+        self.spin_freq_clamp.setEnabled(is_unlocked and self.chk_freq_clamp.isChecked())
+
+    def on_overlay_toggles_changed(self):
+        self.update_clock_overlays()
+        self._update_zc_metric_label()
+
+    def _update_zc_metric_label(self):
+        if (
+            self.auto_zc_thresholds is not None
+            and len(self.auto_zc_thresholds) > 0
+            and self.chk_show_zc.isChecked()
+        ):
+            z0 = float(self.auto_zc_thresholds[0])
+            z1 = float(self.auto_zc_thresholds[-1])
+            self.lbl_zc_metric.setText(f"ZC Track: {z0:.4g} \u2192 {z1:.4g} (\u0394 {z1 - z0:+.4g})")
+            self.lbl_zc_metric.setVisible(True)
+        else:
+            self.lbl_zc_metric.setText("")
+            self.lbl_zc_metric.setVisible(False)
+
+    def update_clock_overlays(self):
+        """Render optional sampling points and tracked ZC/outer threshold overlays in viewport."""
+        if self.centered_analog_data is None:
+            self.sample_points.setData([], [])
+            self.zc_curve.setData([], [])
+            self.zc_outer_curve.setData([], [])
+            return
+
+        view_min, view_max = self.plot_main.viewRange()[0]
+
+        # 1. Sampling points
+        if self.auto_clock_centers is not None and self.chk_show_samples.isChecked():
+            centers_arr = self.auto_clock_centers
+            if len(centers_arr) > 0:
+                pad_x = (
+                    float(centers_arr[1] - centers_arr[0])
+                    if len(centers_arr) > 1
+                    else (view_max - view_min) * 0.05
+                )
+                vis_centers = centers_arr[
+                    (centers_arr >= view_min - pad_x) & (centers_arr <= view_max + pad_x)
+                ]
+                if len(vis_centers) == 0:
+                    self.sample_points.setData([], [])
+                else:
+                    if len(vis_centers) > MAX_OVERLAY_ITEMS:
+                        step = (len(vis_centers) + MAX_OVERLAY_ITEMS - 1) // MAX_OVERLAY_ITEMS
+                        vis_centers = vis_centers[::step]
+                    vis_y = clk.sample_signal_at_positions(
+                        self.centered_analog_data, vis_centers, self.local_sr
+                    )
+                    self.sample_points.setData(x=vis_centers, y=vis_y)
+            else:
+                self.sample_points.setData([], [])
+        else:
+            self.sample_points.setData([], [])
+
+        # 2. Per-symbol ZC threshold and outer 4/8-FSK boundaries
+        outer_offsets = [
+            float(t) for t in (self.adjusted_thresholds or []) if abs(float(t)) > 1e-12
+        ]
+        if (
+            self.auto_zc_thresholds is not None
+            and self.auto_clock_edges is not None
+            and self.chk_show_zc.isChecked()
+        ):
+            n = min(len(self.auto_clock_edges) - 1, len(self.auto_zc_thresholds))
+            if n <= 0:
+                self.zc_curve.setData([], [])
+                self.zc_outer_curve.setData([], [])
+            else:
+                left_edges = self.auto_clock_edges[:n]
+                right_edges = self.auto_clock_edges[1 : n + 1]
+                zcs = self.auto_zc_thresholds[:n]
+                mask = (right_edges >= view_min) & (left_edges <= view_max)
+                count = int(np.count_nonzero(mask))
+                if count == 0:
+                    self.zc_curve.setData([], [])
+                    self.zc_outer_curve.setData([], [])
+                elif count <= MAX_OVERLAY_ITEMS:
+                    x_pairs = np.empty(2 * count, dtype=np.float64)
+                    x_pairs[0::2] = left_edges[mask]
+                    x_pairs[1::2] = right_edges[mask]
+                    y_pairs = np.repeat(zcs[mask], 2)
+                    self.zc_curve.setData(x_pairs, y_pairs, connect='pairs')
+                    if outer_offsets:
+                        outer_x = np.tile(x_pairs, len(outer_offsets))
+                        outer_y = np.concatenate([y_pairs + off for off in outer_offsets])
+                        self.zc_outer_curve.setData(outer_x, outer_y, connect='pairs')
+                    else:
+                        self.zc_outer_curve.setData([], [])
+                else:
+                    step = (count + MAX_OVERLAY_ITEMS - 1) // MAX_OVERLAY_ITEMS
+                    if self.auto_clock_centers is not None and len(self.auto_clock_centers) >= n:
+                        xs = self.auto_clock_centers[:n][mask][::step]
+                    else:
+                        xs = (0.5 * (left_edges[mask] + right_edges[mask]))[::step]
+                    ys = zcs[mask][::step]
+                    self.zc_curve.setData(xs, ys, connect='all')
+                    if outer_offsets:
+                        seg_x = []
+                        seg_y = []
+                        nan_pt = np.array([np.nan], dtype=np.float64)
+                        for idx, off in enumerate(outer_offsets):
+                            if idx > 0:
+                                seg_x.append(nan_pt)
+                                seg_y.append(nan_pt)
+                            seg_x.append(xs)
+                            seg_y.append(ys + off)
+                        self.zc_outer_curve.setData(
+                            np.concatenate(seg_x), np.concatenate(seg_y), connect='finite'
+                        )
+                    else:
+                        self.zc_outer_curve.setData([], [])
+        else:
+            self.zc_curve.setData([], [])
+            self.zc_outer_curve.setData([], [])
 
     def run_auto_sync(self):
         if self.centered_analog_data is None: return
@@ -592,25 +937,48 @@ class SlicerTab(BaseSignalTab):
         
         sr = self.local_sr
         limit = self.stop_line.value() if self.chk_stop_limit.isChecked() else None
+        alpha = float(self.spin_alpha.value())
+        beta = None if self.chk_auto_beta.isChecked() else float(self.spin_beta.value())
+        gamma = None if self.chk_auto_gamma.isChecked() else float(self.spin_gamma.value())
+        outlier_rejection = self.chk_outlier_rejection.isChecked()
+        freq_clamp_pct = float(self.spin_freq_clamp.value()) if self.chk_freq_clamp.isChecked() else None
+        is_3rd = self.cb_pll_order.currentText() == PLL_MODE_3RD
         
-        # Use DSP lib with PLL algorithm
-        success, centers, manual_boundary = dsp.find_clock_sync(
-            self.centered_analog_data, 
-            sr, 
-            start_time, 
-            current_width, 
-            current_count, 
-            self.spin_alpha.value(),
-            limit
-        )
+        if is_3rd:
+            success, centers, zc_thresholds, manual_boundary = clk.find_clock_sync_3rd_order(
+                self.centered_analog_data,
+                sr,
+                start_time,
+                current_width,
+                current_count,
+                initial_zc=0.0,
+                alpha=alpha,
+                beta=beta,
+                gamma=gamma,
+                limit_time=limit,
+                outlier_rejection=outlier_rejection,
+                freq_clamp_pct=freq_clamp_pct,
+            )
+        else:
+            success, centers, manual_boundary = clk.find_clock_sync(
+                self.centered_analog_data,
+                sr,
+                start_time,
+                current_width,
+                current_count,
+                alpha=alpha,
+                limit_time=limit,
+                beta=beta,
+                outlier_rejection=outlier_rejection,
+                freq_clamp_pct=freq_clamp_pct,
+            )
+            zc_thresholds = np.zeros(len(centers), dtype=np.float64)
         
         if success and len(centers) > 0:
             self.auto_clock_centers = centers
-            # Reconstruct the edges from the centers for visualization
-            self.auto_clock_edges = [centers[0] - (centers[1]-centers[0])/2] # First edge
-            for i in range(len(centers) - 1):
-                self.auto_clock_edges.append((centers[i] + centers[i+1]) / 2.0)
-            self.auto_clock_edges.append(centers[-1] + (centers[-1]-centers[-2])/2) # Last edge
+            fallback_sps = current_width / max(1, current_count)
+            self.auto_clock_edges = clk.compute_edges_from_centers(centers, fallback_sps)
+            self.auto_zc_thresholds = zc_thresholds
             
             # Lock the UI
             self.clock_region.setMovable(False)
@@ -621,13 +989,18 @@ class SlicerTab(BaseSignalTab):
             self.btn_auto_sync.setEnabled(False)
             self.btn_clear_auto.setEnabled(True)
             self.chk_lock_pos.setEnabled(False)
+            self.btn_locate_cursor.setEnabled(False)
+            self._set_pll_controls_enabled(False)
             
             # Show Red Boundary Line
             self.auto_start_line.setValue(manual_boundary)
             self.auto_start_line.setVisible(True)
             
             total = len(centers)
-            self.lbl_auto_status.setText(f"Status: PLL Mode (Total Sym: {total})")
+            if is_3rd:
+                self.lbl_auto_status.setText(f"Status: 3rd-Order PLL (Total Sym: {total})")
+            else:
+                self.lbl_auto_status.setText(f"Status: PLL Mode (Total Sym: {total})")
             self.lbl_auto_status.setStyleSheet("color: #2E7D32; font-weight: bold;")
 
             if total > 1:
@@ -640,22 +1013,32 @@ class SlicerTab(BaseSignalTab):
                     self.lbl_baud_metric.setVisible(True)
                     self.lbl_sps_metric.setText(f"SPS: {sps:.2f}")
                     self.lbl_sps_metric.setVisible(True)
-            
+
+            self._update_zc_metric_label()
             self.apply_zoom_limits()
             self.refresh_plot_data()
             self.extract_symbols()
+        else:
+            self.lbl_auto_status.setText("Status: Auto-Sync produced 0 symbols.")
+            self.lbl_auto_status.setStyleSheet("color: #d32f2f; font-weight: bold;")
 
-    def clear_auto_sync(self):
+    def clear_auto_sync(self, _checked=False, *, refresh=True):
         # Resets back to manual mode.
         self.auto_clock_centers = None
         self.auto_clock_edges = None
+        self.auto_zc_thresholds = None
         
         self.auto_start_line.setVisible(False)
+        self.sample_points.setData([], [])
+        self.zc_curve.setData([], [])
+        self.zc_outer_curve.setData([], [])
         
         # Unlock UI
         self.spin_symbols.setEnabled(True)
         self.btn_clear_auto.setEnabled(False)
         self.chk_lock_pos.setEnabled(True)
+        self.btn_locate_cursor.setEnabled(True)
+        self._set_pll_controls_enabled(True)
         
         self.toggle_lock_position() # Apply correct lock state for lines
         
@@ -666,11 +1049,13 @@ class SlicerTab(BaseSignalTab):
         self.lbl_baud_metric.setVisible(False)
         self.lbl_sps_metric.setText("")
         self.lbl_sps_metric.setVisible(False)
+        self._update_zc_metric_label()
         
         self.check_auto_enable()
         self.apply_zoom_limits()
-        self.refresh_plot_data()
-        self.extract_symbols()
+        if refresh:
+            self.refresh_plot_data()
+            self.extract_symbols()
 
     def autoscale_view(self):
         if self.centered_analog_data is None: return
@@ -693,6 +1078,9 @@ class SlicerTab(BaseSignalTab):
         self.plot_main.setYRange(y_min - margin, y_max + margin)
 
     def locate_cursor(self):
+        if self.auto_clock_centers is not None:
+            return
+
         # Calculate viewport bounds
         view_range = self.plot_main.viewRange()[0]
         min_x, max_x = view_range[0], view_range[1]
@@ -800,6 +1188,9 @@ class SlicerTab(BaseSignalTab):
             self.plot_main.getAxis('bottom').setTextPen('k')
             self.apply_opaque_grid('#d8d8d8')
             self.clock_region.setBrush(pg.mkBrush(0, 0, 0, 50)) 
+            zc_track_color = '#006064'
+            zc_outer_color = '#00838F'
+            sample_brush = pg.mkBrush('#00C853')
         else:
             self.plot_main.setBackground('#1e1e1e')
             self.plot_main.getAxis('left').setPen('w')
@@ -808,6 +1199,14 @@ class SlicerTab(BaseSignalTab):
             self.plot_main.getAxis('bottom').setTextPen('w')
             self.apply_opaque_grid('#383838')
             self.clock_region.setBrush(pg.mkBrush(255, 255, 255, 30))
+            zc_track_color = '#18FFFF'
+            zc_outer_color = '#18FFFF'
+            sample_brush = pg.mkBrush('#00E676')
+
+        self.zc_curve.setPen(pg.mkPen(zc_track_color, width=2.5))
+        self.zc_outer_curve.setPen(pg.mkPen(zc_outer_color, width=1.5, style=Qt.PenStyle.DashLine))
+        self.sample_points.setPen(pg.mkPen('#111111', width=1.5))
+        self.sample_points.setBrush(sample_brush)
         
         self.update_digital_color(self.digital_color_name)
 
